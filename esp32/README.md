@@ -158,9 +158,19 @@ connected.
 | Green | Connected |
 | Yellow, blinking | Reconnecting |
 | Purple | Not paired |
+| Cyan, breathing | Code pairing: scan the QR code with the Muse app |
 | Red, blinking | Something went wrong: check the log |
 
 To reset the device and set it up again, hold the button for 5 seconds.
+
+**Pairing without Bluetooth (experimental).** Build with
+`CONFIG_GADGET_CODE_PAIRING=y` and a gadget that is already online (any IP
+link works: a known Wi-Fi network, Ethernet, cellular) also shows a QR code for
+ten minutes after it boots unpaired or you press the button. Scan it in the Muse
+app; the app sends the device tokens encrypted to a key only the gadget holds.
+Bluetooth setup keeps working, and whichever finishes first wins. The protocol
+is in [docs/code-pairing.md](../docs/code-pairing.md); the firmware side is
+described in `AGENTS.md`.
 
 On the experimental EchoEar-2ST, press the screen to confirm pairing; after
 pairing, hold the screen microphone to record and release it to send. See
@@ -318,7 +328,9 @@ Two crypto tests are skipped unless the host has what they need. Install the
 host Mbed TLS library (`brew install mbedtls pkgconf` on macOS,
 `apt-get install libmbedtls-dev pkg-config` on Debian or Ubuntu), and run the
 tests from a terminal where you ran ESP-IDF's `export.sh`, which sets
-`IDF_PATH`. The last line of the output shows `skipped=` if any were left out.
+`IDF_PATH`. The code pairing test checks its HPKE against vectors with the
+host's OpenSSL library (`libssl-dev` on Debian or Ubuntu) and skips that part
+without it. The last line of the output shows `skipped=` if any were left out.
 
 ## Community
 

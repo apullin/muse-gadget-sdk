@@ -379,6 +379,54 @@ static void test_refresh_and_mint_carry_sdk_token(void) {
     vm_api_set_sdk_token(NULL);
 }
 
+static void test_bind_refresh_carries_sdk_token_and_reports_refusals(void) {
+    vm_device_tokens_t tokens = {0};
+    char problem[48];
+    vm_api_set_sdk_token("mgst_token");
+    fake_queue_response(200, "{\"access_token\":\"new-a\",\"refresh_token\":\"new-r\"}");
+    int rc = vm_api_bind_device_token("old-a", "old-r", "link-123", &tokens,
+                                      problem, sizeof(problem));
+    CHECK(rc == 0, "bind rc=%d", rc);
+    expect_token_pair(&tokens, "new-a", "new-r");
+    expect_url(&g_requests[0], "/device_token/refresh");
+    CHECK(strcmp(g_requests[0].authorization, "Bearer old-a") == 0, "bind auth");
+    CHECK(strcmp(g_requests[0].body,
+                 "{\"device_id\":\"link-123\",\"sdk_token\":\"mgst_token\"}") == 0,
+          "unexpected bind body: %s", g_requests[0].body);
+    CHECK(problem[0] == '\0', "problem=%s", problem);
+    vm_device_tokens_free(&tokens);
+
+    // A refusal names its problem type, and isn't retried.
+    fake_reset();
+    fake_queue_response(403, "{\"type\":\"sdkTokenRevoked\",\"title\":\"x\"}");
+    rc = vm_api_bind_device_token("old-a", "old-r", "link-123", &tokens,
+                                  problem, sizeof(problem));
+    CHECK(rc == VM_API_ERR_AUTH, "bind 403 rc=%d", rc);
+    CHECK(strcmp(problem, "sdkTokenRevoked") == 0, "problem=%s", problem);
+    CHECK(g_request_count == 1, "bind 403 request count=%d", g_request_count);
+    expect_empty_tokens(&tokens);
+
+    fake_reset();
+    fake_queue_response(400, "{\"type\":\"sdkTokenDeviceLimitReached\"}");
+    rc = vm_api_bind_device_token("old-a", "old-r", "link-123", &tokens,
+                                  problem, sizeof(problem));
+    CHECK(rc == VM_API_ERR_FAILED, "bind 400 rc=%d", rc);
+    CHECK(strcmp(problem, "sdkTokenDeviceLimitReached") == 0, "problem=%s", problem);
+
+    // An access token refused with 401 falls back to the refresh token.
+    fake_reset();
+    fake_queue_response(401, "");
+    fake_queue_response(200, "{\"access_token\":\"fb-a\",\"refresh_token\":\"fb-r\"}");
+    rc = vm_api_bind_device_token("old-a", "old-r", "link-123", &tokens,
+                                  problem, sizeof(problem));
+    CHECK(rc == 0, "bind fallback rc=%d", rc);
+    CHECK(strcmp(g_requests[1].authorization, "Bearer hatch_refresh:old-r") == 0,
+          "bind fallback auth: %s", g_requests[1].authorization);
+    expect_token_pair(&tokens, "fb-a", "fb-r");
+    vm_device_tokens_free(&tokens);
+    vm_api_set_sdk_token(NULL);
+}
+
 static void test_refresh_falls_back_to_refresh_token_on_401(void) {
     vm_device_tokens_t tokens = {0};
     vm_token_refresh_method_t method = VM_TOKEN_REFRESH_NONE;
@@ -862,6 +910,7 @@ int main(void) {
     RUN_TEST(test_mint_auth_failure_is_not_retried);
     RUN_TEST(test_refresh_success_via_access_token);
     RUN_TEST(test_refresh_and_mint_carry_sdk_token);
+    RUN_TEST(test_bind_refresh_carries_sdk_token_and_reports_refusals);
     RUN_TEST(test_refresh_falls_back_to_refresh_token_on_401);
     RUN_TEST(test_refresh_does_not_fallback_on_403);
     RUN_TEST(test_refresh_no_fallback_without_refresh_token);

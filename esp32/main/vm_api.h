@@ -17,6 +17,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #define VM_API_MAX_VMS 8
 #define VM_API_ERR_FAILED -1
@@ -46,6 +47,9 @@ typedef enum {
 // as-is. NULL or empty restores the compiled default.
 void vm_api_set_base_url(const char *url);
 
+// The API base in use: api_url_v2, or the compiled default.
+const char *vm_api_base_url(void);
+
 // SDK token sent with device-token mint and refresh. NULL or empty sends none.
 void vm_api_set_sdk_token(const char *sdk_token);
 
@@ -73,6 +77,16 @@ int vm_api_refresh_device_token(const char *access_token,
                                 const char *device_id,
                                 vm_device_tokens_t *out,
                                 vm_token_refresh_method_t *method);
+
+// Code pairing's binding refresh: refresh once with the access token (then
+// the refresh token, if the access token is refused), carrying the SDK token
+// next to device_id, so Muse records the SDK token against the device. On a
+// refusal, problem_type gets the answer's problem `type` (e.g.
+// "sdkTokenRevoked"), or "". Returns 0 with a new pair in out,
+// VM_API_ERR_AUTH on 401/403, or VM_API_ERR_FAILED.
+int vm_api_bind_device_token(const char *access_token, const char *refresh_token,
+                             const char *device_id, vm_device_tokens_t *out,
+                             char *problem_type, size_t problem_cap);
 
 void vm_device_tokens_free(vm_device_tokens_t *tokens);
 

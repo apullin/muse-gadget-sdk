@@ -422,6 +422,7 @@ The status LED (or the edge bars or avatar on display boards) shows the state:
 | green | connected (tunnel up, or control session up when the tunnel is off) |
 | yellow, blinking | VM switching or connection lost |
 | purple | unpaired |
+| cyan, breathing | code pairing: QR code shown, waiting for the Muse app (`CONFIG_GADGET_CODE_PAIRING`) |
 | red, blinking | error |
 
 Button (BOOT on the dev boards):
@@ -450,6 +451,72 @@ touch boards' speaker button appear. They're hidden until then, since a press
 can't reach Muse and there are no replies to mute. The StopWatch is an exception:
 its dedicated microphone, speaker/mute and power rim icons stay visible before
 pairing as well, identifying its three physical controls.
+
+### Code pairing (experimental)
+
+`CONFIG_GADGET_CODE_PAIRING` (off by default, under "ESP32 Device SDK") pairs a
+gadget that is already online without Bluetooth, as `docs/code-pairing.md`
+describes: the gadget shows a QR code with its node id, an X25519 public key
+and a one-time code that changes every 10 seconds; the Muse app seals the
+device tokens to that key (HPKE) and drops them on the server; the gadget polls
+`/device_drop/poll` with its recent codes and opens the drop. BLE setup stays
+the default and keeps working: whichever finishes first wins
+(`complete_setup_and_stop_ble()` stops code pairing; code pairing marks setup
+complete and stops BLE through the same function).
+
+- **When:** the app heartbeat opens the 10-minute window
+  (`CONFIG_GADGET_CODE_PAIRING_WINDOW_S`) once the gadget is unpaired and
+  `code_pairing_net_up()` says the link is up; a short press reopens it. Today
+  that means a board that is online while unpaired: a Muse board that joined
+  Wi-Fi from its settings, or the `CONFIG_HOMEHUB_WIFI_SSID` dev override. A
+  plain Link board wipes Wi-Fi without tokens at boot, so it needs another
+  link (or the SoftAP below) before code pairing can start.
+- **Any IP link works.** `code_pairing_net_up()` and
+  `code_pairing_net_wait_up(timeout_ms)` in `main/code_pairing_esp.c` are weak
+  and default to the Wi-Fi manager; an Ethernet or cellular link plugs in by
+  defining both (they map one to one onto a `net_link_up()` /
+  `net_link_wait_up()` pair).
+- **Screen:** colour LCDs draw the QR code (`CONFIG_GADGET_CODE_PAIRING_QR`,
+  default on, uses `espressif/qrcode`) with "Scan with the Muse app" under it,
+  redrawn every 10 s. E-paper and other boards show "Pair in the Muse app" and
+  print the link on the serial console every 10 s; LED-only boards breathe
+  cyan (`LED_STATE_CODE_PAIRING`). After pairing, "Paired to <name>".
+- **Keys:** the X25519 private key (`cp_key`) and the one-time-code secret
+  (`cp_otp`) live in NVS, are made when missing, survive restarts, and are
+  deleted after pairing and by a setup reset (`config_clear_setup()`). A claim
+  sticker's code, if flashed, is read from `cp_claim` and added to every poll.
+- **After the drop opens:** anyone who saw the QR code can seal a payload
+  that opens, so the tokens are vetted before anything is saved, at the API
+  root code pairing polls: a community gadget refreshes once with its SDK token
+  (`vm_api_bind_device_token()`; `sdkTokenDeviceLimitReached`,
+  `sdkTokenInvalid` or `sdkTokenRevoked` stops pairing, 401/403 means fake
+  tokens, anything else keeps the payload's), then `fetch_vms` (401/403: fake).
+  A junk or fake drop is ignored and the code that brought it is left out of
+  later polls. Vetted tokens are stored the way BLE provisioning stores them
+  (`app_code_pairing_store()` in `main/app.c`), the drop is acknowledged, the
+  keys are deleted, and the gadget connects as after BLE setup.
+- **Code:** `main/code_pairing.c` is the portable state machine (no ESP-IDF
+  includes; one HTTP request per `code_pairing_step()`), `main/muse_hpke.c`
+  the HPKE (RFC 9180, base mode, X25519/HKDF-SHA256/AES-128-GCM) over
+  primitives the platform provides, `main/code_pairing_esp.c` the ESP-IDF
+  platform (PSA Crypto, `esp_http_client`, NVS, display) and its task.
+  `CONFIG_GADGET_CODE_PAIRING_API_URL` points it at a test server.
+- **Tests:** `tests/test_code_pairing.py` runs `tests/code_pairing_harness.c`
+  against a fake drop server, and checks the HPKE and one-time codes against
+  `tests/vectors/code_pairing_hpke.json` (made by
+  `tests/vectors/gen_code_pairing_hpke.py` with `cryptography` and `pyhpke`)
+  when `pkg-config libcrypto` finds the host's OpenSSL.
+- Never log the private key, the code secret, a claim code, a drop or the
+  tokens. The link (with its one-time code) goes to the serial console only.
+
+### SoftAP (interface only)
+
+`main/softap_prov.h` declares an optional transport for code pairing on a
+gadget with Wi-Fi but no known network: open a WPA2 access point
+(`MuseGadget-XXXXXX`), serve a setup page at `http://192.168.4.1/`, hand the
+chosen network to a callback, then join it and pair with a code. It carries
+Wi-Fi credentials only, never Muse tokens. `main/softap_prov.c` is a stub that
+returns `ESP_ERR_NOT_SUPPORTED`; nothing calls it yet.
 
 To skip BLE Wi-Fi provisioning while you iterate, set
 `CONFIG_HOMEHUB_WIFI_SSID` and `CONFIG_HOMEHUB_WIFI_PASSWORD` in `menuconfig`.

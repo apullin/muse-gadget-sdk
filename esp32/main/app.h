@@ -60,6 +60,17 @@ bool app_confirm_pairing_press(void);
 void app_reset_setup_async(void);
 #endif
 
+#if CONFIG_GADGET_CODE_PAIRING
+// Code pairing (code_pairing_esp.c). Store the vetted device tokens and
+// endpoints where Bluetooth setup does; false if setup already completed
+// another way or storage failed.
+bool app_code_pairing_store(const char *access_token, const char *refresh_token,
+                            const char *device_id, const char *api_url_v2,
+                            const char *noise_host, const char *username);
+// The tokens work: complete setup, stop Bluetooth setup, connect.
+void app_code_pairing_done(void);
+#endif
+
 #if CONFIG_MUSE_ENABLED || CONFIG_HOMEHUB_VOICE
 // Looks up a VM credential from the paired account (want_vm: a VM id, or empty
 // for the preferred VM). *vm_token is heap; free() it.

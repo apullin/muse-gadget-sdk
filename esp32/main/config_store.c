@@ -183,6 +183,8 @@ bool config_clear_setup(void) {
         "wifi_others",
         "wifi_hidden",
         "setup_complete",
+        "cp_key",
+        "cp_otp",
     };
     return clear_and_verify(keys, sizeof(keys) / sizeof(keys[0]));
 }

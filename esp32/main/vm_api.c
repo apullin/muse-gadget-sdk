@@ -105,6 +105,10 @@ void vm_api_set_base_url(const char *url) {
              url && *url ? url : VM_API_DEFAULT_BASE_URL);
 }
 
+const char *vm_api_base_url(void) {
+    return s_api_base;
+}
+
 void vm_api_set_sdk_token(const char *sdk_token) {
     if (sdk_token && strlen(sdk_token) >= sizeof(s_sdk_token)) {
         ESP_LOGE(TAG, "SDK token too long; sending none");
@@ -482,6 +486,51 @@ int vm_api_refresh_device_token(const char *access_token,
         ESP_LOGI(TAG, "device token refreshed via refresh token");
     }
     return rc;
+}
+
+static int bind_leg(const char *auth_header, const char *device_id,
+                    vm_device_tokens_t *out, int *status,
+                    char *problem_type, size_t problem_cap) {
+    char *body = make_device_body(device_id);
+    if (!body) return VM_API_ERR_FAILED;
+    char url[320];
+    make_api_url(url, sizeof(url), REFRESH_TOKEN_PATH);
+    resp_buf_t resp = {0};
+    int rc = http_json(url, HTTP_METHOD_POST, auth_header, body, &resp, status);
+    cJSON_free(body);
+    if (rc == 0) return parse_token_pair(&resp, out);
+    if (resp.buf && resp.len && problem_type && problem_cap) {
+        cJSON *root = cJSON_ParseWithLength(resp.buf, resp.len);
+        cJSON *type = cJSON_IsObject(root) ? cJSON_GetObjectItem(root, "type") : NULL;
+        if (cJSON_IsString(type) && type->valuestring) {
+            snprintf(problem_type, problem_cap, "%s", type->valuestring);
+        }
+        cJSON_Delete(root);
+    }
+    free(resp.buf);
+    return rc;
+}
+
+int vm_api_bind_device_token(const char *access_token, const char *refresh_token,
+                             const char *device_id, vm_device_tokens_t *out,
+                             char *problem_type, size_t problem_cap) {
+    if (problem_type && problem_cap) problem_type[0] = '\0';
+    if (!device_id || !*device_id || !out) return VM_API_ERR_FAILED;
+    *out = (vm_device_tokens_t){0};
+    char auth_header[2048];
+    int status = 0;
+    int rc = VM_API_ERR_FAILED;
+    if (access_token && *access_token
+        && make_bearer(access_token, auth_header, sizeof(auth_header)) == 0) {
+        rc = bind_leg(auth_header, device_id, out, &status, problem_type, problem_cap);
+        if (rc == 0 || status != 401) return rc;
+    }
+    if (!refresh_token || !*refresh_token
+        || make_refresh_bearer(refresh_token, auth_header, sizeof(auth_header)) != 0) {
+        return rc;
+    }
+    if (problem_type && problem_cap) problem_type[0] = '\0';
+    return bind_leg(auth_header, device_id, out, &status, problem_type, problem_cap);
 }
 
 void vm_device_tokens_free(vm_device_tokens_t *tokens) {

@@ -673,6 +673,7 @@ void muse_glue_led_state(led_state_t state) {
             break;
         case LED_STATE_SETUP_IDLE:
         case LED_STATE_BLE_ADVERTISING:
+        case LED_STATE_CODE_PAIRING:
         case LED_STATE_UNPAIRED:
             st = MUSE_LINK_UNPAIRED;
             break;

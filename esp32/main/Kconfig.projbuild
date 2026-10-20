@@ -61,6 +61,56 @@ menu "ESP32 Device SDK"
             Password for CONFIG_HOMEHUB_WIFI_SSID. Ignored when the SSID
             override is empty.
 
+    config GADGET_CODE_PAIRING
+        bool "Code pairing: pair without Bluetooth (experimental)"
+        default n
+        help
+            While the gadget is unpaired and already online, it also shows a
+            QR code for the Muse app (on a colour screen; the link goes to the
+            serial console and the light breathes cyan otherwise) and polls
+            Muse for its device tokens, which the app seals to a key only the
+            gadget holds. Pairing stays open for 10 minutes after boot or a
+            button press. Bluetooth setup stays on and works as before;
+            whichever finishes first wins. The protocol is in
+            docs/code-pairing.md.
+
+            Code pairing needs only an IP link. It uses Wi-Fi when the gadget
+            already knows a network; another link plugs in through
+            code_pairing_net_up() and code_pairing_net_wait_up().
+
+            Experimental: Muse turns code pairing on and off on its side, and
+            the gadget falls back to Bluetooth setup whenever it is off.
+
+    config GADGET_CODE_PAIRING_QR
+        bool "Show a QR code on boards with a screen"
+        depends on GADGET_CODE_PAIRING
+        default y
+        help
+            Draws the pairing link as a QR code on boards with a colour status
+            screen, again every 10 seconds as its one-time code changes, with
+            the espressif/qrcode component. Without it (and on e-paper), the
+            link goes to the serial console.
+
+    config GADGET_CODE_PAIRING_WINDOW_S
+        int "How long pairing stays open (seconds)"
+        depends on GADGET_CODE_PAIRING
+        range 60 3600
+        default 600
+        help
+            After the gadget boots unpaired or the button is pressed, it shows
+            the QR code and polls for this long, then hides the code until
+            asked again.
+
+    config GADGET_CODE_PAIRING_API_URL
+        string "API root for code pairing (testing)"
+        depends on GADGET_CODE_PAIRING
+        default ""
+        help
+            Leave empty to use the gadget's usual API root. Set it to test
+            against a local server that implements docs/code-pairing.md.
+            When the payload names no API root, the gadget keeps using this
+            one after pairing.
+
     config HOMEHUB_TOKEN_REFRESH_INTERVAL_DAYS
         int "Proactive device token refresh interval (days, 0 = disabled)"
         range 0 365

@@ -276,6 +276,7 @@ static const char *status_label(led_state_t state) {
         case LED_STATE_BLE_CONNECTED:            return "Pairing";
         case LED_STATE_PAIRING_CONFIRM_REQUIRED:
             return "Press " CONFIG_HOMEHUB_BUTTON_LABEL " to confirm";
+        case LED_STATE_CODE_PAIRING:             return "Pair in the Muse app";
         case LED_STATE_WIFI_CONNECTING:
         case LED_STATE_WIFI_CONNECTED:
         case LED_STATE_AUTH_OK:

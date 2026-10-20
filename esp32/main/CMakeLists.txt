@@ -103,6 +103,17 @@ if(CONFIG_HOMEHUB_LED_BACKEND_DEVKIT_GPIO27 OR CONFIG_HOMEHUB_LED_BACKEND_VOICE_
     list(APPEND GADGET_REQUIRES led_strip)
 endif()
 
+# Code pairing (docs/code-pairing.md): the portable state machine and its
+# ESP-IDF platform.
+if(CONFIG_GADGET_CODE_PAIRING)
+    list(APPEND GADGET_SRCS
+        "code_pairing.c"
+        "code_pairing_esp.c"
+        "muse_hpke.c"
+        "softap_prov.c"
+    )
+endif()
+
 if(CONFIG_HOMEHUB_SENSECAP_SENSORS)
     list(APPEND GADGET_SRCS "sensecap_sensors.c")
 endif()

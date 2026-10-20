@@ -1,0 +1,232 @@
+/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#pragma once
+
+// Code pairing: pair the gadget without Bluetooth (docs/code-pairing.md).
+// The gadget shows a QR code with its id, its X25519 public key and a
+// one-time code that changes every 10 seconds; the Muse app seals the
+// gadget's device tokens to that key (HPKE) and drops them on the server,
+// filed under the code; the gadget polls with its recent codes and opens
+// the drop. Nothing is asked of the server before pairing.
+//
+// A pure C11 state machine with no ESP-IDF or FreeRTOS dependency, so the
+// host tests compile it as is. Every side effect (HTTP, clock, keys, display,
+// network link, token storage) goes through code_pairing_platform_t. It is
+// driven by code_pairing_step(), which makes at most one network request and
+// returns how long to wait before the next step; code_pairing_esp.c runs it
+// on a task.
+//
+// It needs only an IP link. net_up()/net_wait_up() are the seam where Wi-Fi,
+// Ethernet or a cellular modem plugs in.
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "muse_hpke.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef enum {
+    CODE_PAIRING_IDLE,         // not pairing; code_pairing_start() opens the window
+    CODE_PAIRING_WAITING,      // QR code shown, polling for a drop
+    CODE_PAIRING_PAIRED,       // tokens vetted and saved; keys deleted
+    CODE_PAIRING_EXPIRED,      // the pairing window closed; QR code hidden
+    CODE_PAIRING_UNAVAILABLE,  // code pairing is off: Bluetooth setup only
+    CODE_PAIRING_ERROR,        // a bad request, keys or storage failed, or the
+                               // SDK token was refused
+} code_pairing_state_t;
+
+typedef enum {
+    CODE_PAIRING_LOG_DEBUG,
+    CODE_PAIRING_LOG_INFO,
+    CODE_PAIRING_LOG_WARN,
+    CODE_PAIRING_LOG_ERROR,
+} code_pairing_log_level_t;
+
+// What Muse said about a drop's tokens.
+typedef enum {
+    CODE_PAIRING_RESULT_OK,
+    CODE_PAIRING_RESULT_RETRY,        // no verdict: no answer, a 5xx, another refusal
+    CODE_PAIRING_RESULT_REJECTED,     // 401 or 403: the tokens aren't real
+    CODE_PAIRING_RESULT_SDK_REFUSED,  // the SDK token: at its device limit, invalid, revoked
+} code_pairing_result_t;
+
+// http_post_json() result for a request that got no HTTP answer.
+#define CODE_PAIRING_HTTP_TRANSPORT_ERROR (-1)
+
+// code_pairing_step() returns this when there is nothing to do until
+// code_pairing_start() or code_pairing_stop() is called.
+#define CODE_PAIRING_NO_STEP UINT32_MAX
+
+#define CODE_PAIRING_PUBKEY_BYTES MUSE_HPKE_KEY_BYTES
+#define CODE_PAIRING_SECRET_BYTES 32
+#define CODE_PAIRING_OTP_LEN 8
+// 16 lowercase hex characters and the NUL.
+#define CODE_PAIRING_FINGERPRINT_LEN 17
+// The codes for c, c-1 ... c-5: the last 60 seconds.
+#define CODE_PAIRING_RECENT_OTPS 6
+#define CODE_PAIRING_STEP_S 10
+#define CODE_PAIRING_WINDOW_S 600
+#define CODE_PAIRING_LINK_BASE "https://muse.ai/pair"
+#define CODE_PAIRING_MAX_LINK 512
+#define CODE_PAIRING_MAX_PROBLEM 40
+#define CODE_PAIRING_MAX_SEALED 4096  // ciphertext bytes accepted
+#define CODE_PAIRING_SKIP_OTPS 8
+
+typedef struct {
+    void *ctx;  // passed back to every call
+
+    // POST body (JSON) to url. Returns 0 when an HTTP answer arrived, whatever
+    // its status, with *status set, *resp_body a malloc'd NUL-terminated body
+    // (or NULL) that the caller frees, and *retry_after_s the Retry-After
+    // header in seconds (-1 when absent). Returns
+    // CODE_PAIRING_HTTP_TRANSPORT_ERROR when no answer arrived.
+    int (*http_post_json)(void *ctx, const char *url, const char *body,
+                          int *status, char **resp_body, int *retry_after_s);
+    // Milliseconds from a clock that advances steadily (uptime is fine). It
+    // schedules polls and counts the one-time codes.
+    uint64_t (*now_ms)(void *ctx);
+    // Cryptographically secure random bytes. Optional: used for backoff jitter.
+    bool (*random_bytes)(void *ctx, uint8_t *out, size_t len);
+    // The X25519 public key and the one-time-code secret, generated and saved
+    // first if the gadget has none. They survive restarts until erased.
+    bool (*load_keys)(void *ctx, uint8_t pubkey[CODE_PAIRING_PUBKEY_BYTES],
+                      uint8_t code_secret[CODE_PAIRING_SECRET_BYTES]);
+    // Delete the key pair, the code secret and any claim code (paired).
+    void (*erase_keys)(void *ctx);
+    // X25519 and AES-128-GCM for HPKE; its recipient_dh uses the device key.
+    const muse_hpke_ops_t *hpke;
+    // Whether the IP link is up, and a bounded wait for it to come up.
+    bool (*net_up)(void *ctx);
+    bool (*net_wait_up)(void *ctx, uint32_t timeout_ms);
+    // Show the QR code for link, again each time the code changes (every 10
+    // s); remaining_s is how long pairing stays open.
+    void (*show_code)(void *ctx, const char *link, const char *fingerprint,
+                      uint32_t remaining_s);
+    void (*show_status)(void *ctx, code_pairing_state_t state);
+    // Never given a secret, a code or a token.
+    void (*log)(void *ctx, code_pairing_log_level_t level, const char *msg);
+    // A drop's tokens are unverified until Muse accepts them: anyone who saw
+    // the QR code can seal a payload that opens. Both checks go to the API
+    // root code pairing uses, before anything is saved.
+    //
+    // Community gadgets: refresh once with the SDK token next to device_id,
+    // so Muse records it against the gadget. On OK, *new_access and
+    // *new_refresh get the returned pair (malloc'd; the caller wipes and
+    // frees them). Optional.
+    code_pairing_result_t (*bind_tokens)(void *ctx, const char *access_token,
+                                         const char *refresh_token,
+                                         char **new_access, char **new_refresh);
+    // fetch_vms with the access token.
+    code_pairing_result_t (*verify_tokens)(void *ctx, const char *access_token);
+    // Store the vetted tokens where Bluetooth setup stores them. api_url_v2 is
+    // the API root to keep using (the one code pairing used when the payload
+    // names none); noise_host and username are NULL when absent.
+    bool (*save_tokens)(void *ctx, const char *access_token,
+                        const char *refresh_token, const char *device_id,
+                        const char *api_url_v2, const char *noise_host,
+                        const char *username);
+} code_pairing_platform_t;
+
+typedef struct {
+    const char *base_url;    // API root, no trailing slash
+    const char *link_base;   // NULL: CODE_PAIRING_LINK_BASE
+    const char *node_id;     // the device id the tokens are for
+    const char *model;
+    char wifi;               // 'n' none, 'o' optional, 'r' required
+    bool mgcommands;         // serves gadget commands over Bluetooth
+    bool community;          // built with this SDK, paired with an SDK token
+    const char *sdk_token;   // NULL or "": none sent, no binding refresh
+    // A claim sticker's code (8 characters), added to every poll; NULL if none.
+    const char *claim_code;
+    uint32_t window_s;       // 0: CODE_PAIRING_WINDOW_S
+} code_pairing_config_t;
+
+typedef struct {
+    // Everything below is private.
+    code_pairing_config_t cfg;
+    const code_pairing_platform_t *p;
+    code_pairing_state_t state;
+    int phase;
+    uint8_t pubkey[CODE_PAIRING_PUBKEY_BYTES];
+    uint8_t secret[CODE_PAIRING_SECRET_BYTES];
+    char fingerprint[CODE_PAIRING_FINGERPRINT_LEN];
+    char problem[CODE_PAIRING_MAX_PROBLEM + 1];
+    uint64_t shown_counter;
+    bool shown;
+    uint64_t window_end_ms;
+    uint64_t next_poll_ms;
+    uint32_t interval_s;
+    uint32_t backoff_s;
+    bool net_logged;
+    // The opened drop, until its tokens are vetted, saved and acknowledged.
+    char *access_token;
+    char *refresh_token;
+    char api_url_v2[CODE_PAIRING_MAX_LINK / 2];
+    char noise_host[128];
+    char username[96];
+    char drop_otp[CODE_PAIRING_OTP_LEN + 1];
+    char ack_nonce[64];
+    // Codes that brought junk or rejected tokens, left out of later polls.
+    char skip_otps[CODE_PAIRING_SKIP_OTPS][CODE_PAIRING_OTP_LEN + 1];
+    unsigned skip_next;
+} code_pairing_t;
+
+// Set up cp in IDLE. cfg's strings must outlive cp.
+void code_pairing_init(code_pairing_t *cp, const code_pairing_platform_t *platform,
+                       const code_pairing_config_t *cfg);
+// Open the pairing window (boot while unpaired, or a button press): load or
+// make the keys, show the QR code and poll for 10 minutes. Called while
+// pairing, it does nothing; after it ended, it opens a new window.
+void code_pairing_start(code_pairing_t *cp);
+// Stop pairing and hide the QR code (Bluetooth setup won). Keeps the keys.
+void code_pairing_stop(code_pairing_t *cp);
+// Do the next bit of work: at most one HTTP request. Returns the milliseconds
+// to wait before the next step (CODE_PAIRING_NO_STEP when there is none) and
+// sets *state when non-NULL.
+uint32_t code_pairing_step(code_pairing_t *cp, code_pairing_state_t *state);
+code_pairing_state_t code_pairing_state(const code_pairing_t *cp);
+// The problem `type` that ended pairing ("" if none). Not a secret.
+const char *code_pairing_last_problem(const code_pairing_t *cp);
+const char *code_pairing_state_name(code_pairing_state_t state);
+
+// ---- Helpers, exposed for the platform and tests ---------------------------
+
+// base64url without padding. Returns the length written, or 0 if out_cap
+// (which includes the NUL) is too small.
+size_t code_pairing_b64url_encode(const uint8_t *in, size_t len, char *out,
+                                  size_t out_cap);
+// Decodes base64url, with or without padding. Returns the byte count, or -1.
+int code_pairing_b64url_decode(const char *in, uint8_t *out, size_t out_cap);
+// "300c9c9603b92a4b": the first 8 bytes of SHA-256 over the public key.
+void code_pairing_fingerprint(const uint8_t pubkey[CODE_PAIRING_PUBKEY_BYTES],
+                              char out[CODE_PAIRING_FINGERPRINT_LEN]);
+// The one-time code for counter c: HOTP with HMAC-SHA256, 40 bits as 8
+// Crockford base32 characters.
+void code_pairing_otp(const uint8_t secret[CODE_PAIRING_SECRET_BYTES], uint64_t counter,
+                      char out[CODE_PAIRING_OTP_LEN + 1]);
+// The QR code's link. Returns its length, or 0 if it doesn't fit.
+size_t code_pairing_link(const code_pairing_config_t *cfg,
+                         const uint8_t pubkey[CODE_PAIRING_PUBKEY_BYTES],
+                         const char *otp, char *out, size_t out_cap);
+
+#ifdef __cplusplus
+}
+#endif

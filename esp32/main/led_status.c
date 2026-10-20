@@ -237,6 +237,7 @@ static const rgb_t COLOR_YELLOW   = {80,  50,  0};
 static const rgb_t COLOR_GREEN    = {0,   80,  0};
 static const rgb_t COLOR_RED      = {80,  0,   0};
 static const rgb_t COLOR_PURPLE   = {60,  0,   60};
+static const rgb_t COLOR_CYAN     = {0,   50,  50};
 
 #if CONFIG_HOMEHUB_LED_BACKEND_PWM_RGB
 static void led_hw_set_color(rgb_t c) {
@@ -1073,6 +1074,10 @@ static void led_task(void *arg) {
                 break;
             case LED_STATE_PAIRING_CONFIRM_REQUIRED:
                 breathe(COLOR_BLUE, 2000);
+                break;
+            case LED_STATE_CODE_PAIRING:
+                // Code pairing: approve the code in the Muse app.
+                breathe(COLOR_CYAN, 2000);
                 break;
             case LED_STATE_WIFI_CONNECTING:
             case LED_STATE_WIFI_CONNECTED:

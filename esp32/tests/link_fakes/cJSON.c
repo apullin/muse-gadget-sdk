@@ -273,6 +273,23 @@ static cJSON *parse_literal(parser_t *p, const char *literal, int type) {
     return new_item(type);
 }
 
+static cJSON *parse_number(parser_t *p) {
+    char buf[64];
+    size_t n = 0;
+    while (p->cur + n < p->end && n < sizeof(buf) - 1
+           && strchr("+-0123456789.eE", p->cur[n])) {
+        buf[n] = p->cur[n];
+        n++;
+    }
+    if (n == 0) return NULL;
+    buf[n] = '\0';
+    char *end = NULL;
+    double value = strtod(buf, &end);
+    if (end != buf + n) return NULL;
+    p->cur += n;
+    return cJSON_CreateNumber(value);
+}
+
 static cJSON *parse_value(parser_t *p) {
     skip_ws(p);
     if (p->cur >= p->end) return NULL;
@@ -292,6 +309,7 @@ static cJSON *parse_value(parser_t *p) {
     if (*p->cur == 't') return parse_literal(p, "true", cJSON_True);
     if (*p->cur == 'f') return parse_literal(p, "false", cJSON_False);
     if (*p->cur == 'n') return parse_literal(p, "null", cJSON_NULL);
+    if (*p->cur == '-' || (*p->cur >= '0' && *p->cur <= '9')) return parse_number(p);
     return NULL;
 }
 
@@ -398,6 +416,14 @@ static bool print_value(out_t *out, const cJSON *item) {
         }
         return append_char(out, '}');
     }
+    if (cJSON_IsArray(item)) {
+        if (!append_char(out, '[')) return false;
+        for (const cJSON *child = item->child; child; child = child->next) {
+            if (child != item->child && !append_char(out, ',')) return false;
+            if (!print_value(out, child)) return false;
+        }
+        return append_char(out, ']');
+    }
     return false;
 }
 
@@ -458,4 +484,47 @@ cJSON *cJSON_GetObjectItem(const cJSON *object, const char *string) {
         }
     }
     return NULL;
+}
+
+cJSON *cJSON_GetObjectItemCaseSensitive(const cJSON *object, const char *string) {
+    return cJSON_GetObjectItem(object, string);
+}
+
+cJSON *cJSON_Parse(const char *value) {
+    return value ? cJSON_ParseWithLength(value, strlen(value)) : NULL;
+}
+
+int cJSON_IsNumber(const cJSON *item) {
+    return item && item->type == cJSON_Number;
+}
+
+cJSON *cJSON_CreateString(const char *string) {
+    if (!string) return NULL;
+    cJSON *item = new_item(cJSON_String);
+    if (!item) return NULL;
+    item->valuestring = xstrdup(string);
+    if (!item->valuestring) {
+        cJSON_Delete(item);
+        return NULL;
+    }
+    return item;
+}
+
+cJSON *cJSON_CreateArray(void) {
+    return new_item(cJSON_Array);
+}
+
+int cJSON_AddItemToArray(cJSON *array, cJSON *item) {
+    if (!cJSON_IsArray(array) || !item) return 0;
+    append_child(array, item);
+    return 1;
+}
+
+cJSON *cJSON_AddArrayToObject(cJSON *object, const char *name) {
+    cJSON *item = cJSON_CreateArray();
+    if (!item || !cJSON_AddItemToObject(object, name, item)) {
+        cJSON_Delete(item);
+        return NULL;
+    }
+    return item;
 }

@@ -91,6 +91,9 @@
 #if CONFIG_HOMEHUB_BLE_PERSISTENT
 #include "ble_basic.h"
 #endif
+#if CONFIG_GADGET_CODE_PAIRING
+#include "code_pairing_esp.h"
+#endif  // CONFIG_GADGET_CODE_PAIRING
 
 static const char *TAG = "link.app";
 static const char *HEARTBEAT_TAG = "link.heartbeat";
@@ -687,6 +690,9 @@ static bool complete_setup_and_stop_ble(const char *reason, uint32_t session_gen
     setup_window_lock_take();
     advance_confirm_generation_locked();
     setup_window_lock_give();
+#if CONFIG_GADGET_CODE_PAIRING
+    code_pairing_esp_stop();  // whichever setup finishes first wins
+#endif  // CONFIG_GADGET_CODE_PAIRING
     if (!s_ble_started) return true;
     ESP_LOGI(TAG, "setup complete via %s; stopping BLE", reason);
     if (xTaskCreate(shutdown_ble_task, "ble_stop", 4096, NULL, 4, NULL) != pdPASS) {
@@ -2195,6 +2201,10 @@ static void open_setup_window(const char *reason) {
 
     start_ble_setup_server_if_needed();
     enter_advertising_state(reason);
+#if CONFIG_GADGET_CODE_PAIRING
+    // A press after the pairing window closed shows the code again.
+    code_pairing_esp_restart();
+#endif  // CONFIG_GADGET_CODE_PAIRING
 }
 
 static void on_button_short_press(void) {
@@ -2442,6 +2452,77 @@ void app_reset_setup_async(void) {
     }
 }
 #endif  // CONFIG_MUSE_ENABLED
+
+#if CONFIG_GADGET_CODE_PAIRING
+// ---- Code pairing (app.h, code_pairing_esp.c) --------------------------------
+
+bool app_code_pairing_store(const char *access_token, const char *refresh_token,
+                            const char *device_id, const char *api_url_v2,
+                            const char *noise_host, const char *username) {
+    // Refresh and every later call use this gadget's own device id.
+    if (!device_id || strcmp(device_id, identity_node_id()) != 0) {
+        ESP_LOGW(TAG, "code pairing: tokens are for another device id; ignoring them");
+        return false;
+    }
+    if (!refresh_token || !*refresh_token) return false;
+    if (!operation_gate_take(portMAX_DELAY, "code pairing")) return false;
+    bool ok = false;
+    if (config_setup_complete()) {
+        ESP_LOGI(TAG, "code pairing: setup already complete; keeping it");
+        goto done;
+    }
+    config_erase_key("vm_url");
+    // Only older firmware reads api_url, and code pairing has none to give.
+    bool api_saved = config_erase_key("api_url");
+    api_saved = (api_url_v2 && *api_url_v2 ? config_set_str("api_url_v2", api_url_v2)
+                                           : config_erase_key("api_url_v2")) && api_saved;
+    api_saved = (noise_host && *noise_host ? config_set_str("noise_host", noise_host)
+                                           : config_erase_key("noise_host")) && api_saved;
+    if (!api_saved || !accept_pairing_credentials(access_token, refresh_token, username)) {
+        ESP_LOGW(TAG, "code pairing: couldn't store the credentials");
+        auth_lock_take();
+        config_clear_pairing();
+        auth_lock_give();
+        goto done;
+    }
+    vm_api_set_base_url(api_url_v2);
+    noise_ctrl_set_host(noise_host);
+    ok = true;
+done:
+    operation_gate_give();
+    return ok;
+}
+
+void app_code_pairing_done(void) {
+    if (!operation_gate_take(portMAX_DELAY, "code pairing")) return;
+    if (config_setup_complete() || !config_is_provisioned()) {
+        operation_gate_give();
+        return;
+    }
+    // A Bluetooth setup session still open has nothing left to do.
+    if (s_ble_started && ble_server_has_connection()) ble_server_disconnect_client();
+    if (!complete_setup_and_stop_ble("code pairing", 0)) {
+        ESP_LOGW(TAG, "code pairing: couldn't mark setup complete");
+    }
+    ui_set_status("auth_ok");
+    led_status_set_state(LED_STATE_AUTH_OK);
+#if PAIR_THEN_RESTART
+    setup_stage_set("done");
+    operation_gate_give();
+    ESP_LOGI(TAG, "paired with a code; restarting to connect");
+    if (xTaskCreate(restart_task, "restart", 2048, NULL, 3, NULL) != pdPASS) {
+        esp_restart();
+    }
+#else
+    setup_stage_set("vm");
+    bool connected = connect_preferred_vm_with_gate_held(0);
+    setup_stage_set("done");
+    ui_set_status(connected ? "auth_ok" : "auth_failed");
+    led_status_set_state(connected ? LED_STATE_AUTH_OK : LED_STATE_ERROR);
+    operation_gate_give();
+#endif
+}
+#endif  // CONFIG_GADGET_CODE_PAIRING
 
 // ---- VM transport status forwarding ----------------------------------------
 
@@ -2877,6 +2958,13 @@ void app_run(void) {
 #if CONFIG_MUSE_ENABLED
         muse_keep_vm_session();
 #endif
+
+#if CONFIG_GADGET_CODE_PAIRING
+        // Unpaired and online: offer code pairing beside Bluetooth setup.
+        if (!config_setup_complete() && code_pairing_net_up()) {
+            code_pairing_esp_start_if_idle();
+        }
+#endif  // CONFIG_GADGET_CODE_PAIRING
 
         // Runs on every heartbeat tick, and does two things.
         //
