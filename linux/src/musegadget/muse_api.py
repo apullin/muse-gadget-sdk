@@ -149,17 +149,35 @@ def refresh_device_token(
     accept it and answer 200 with replacement tokens that every endpoint then
     rejects, which would overwrite working credentials.
     """
+    tokens, status, _ = refresh_device_token_detailed(refresh_token, device_id, root, sdk_token)
+    return tokens, status
+
+
+def refresh_device_token_detailed(
+    refresh_token: str, device_id: str, root: str = api_root(),
+    sdk_token: str | None = None,
+) -> tuple[dict | None, int | None, str | None]:
+    """``refresh_device_token``, plus the problem ``type`` of an error answer, if any."""
     # Apps now hand over refresh tokens that already carry the hatch_refresh:
     # prefix; doubling it makes the server reject it. Same rule as the ESP32.
     raw_refresh = refresh_token.rsplit(":", 1)[-1]
     try:
-        return _post_refresh(f"Bearer hatch_refresh:{raw_refresh}", device_id, root, sdk_token), 200
+        return _post_refresh(f"Bearer hatch_refresh:{raw_refresh}", device_id, root, sdk_token), 200, None
     except urllib.error.HTTPError as exc:
         if exc.code == 401:
             log.warning("token refresh rejected: device must be paired again")
         else:
             log.warning("token refresh failed: HTTP %d", exc.code)
-        return None, exc.code
+        return None, exc.code, _problem_type(exc)
     except (urllib.error.URLError, json.JSONDecodeError, OSError) as exc:
         log.warning("token refresh failed: %s", exc)
-        return None, None
+        return None, None, None
+
+
+def _problem_type(exc: urllib.error.HTTPError) -> str | None:
+    try:
+        data = json.loads(exc.read() or b"null")
+    except (OSError, ValueError):
+        return None
+    kind = data.get("type") if isinstance(data, dict) else None
+    return kind if isinstance(kind, str) else None

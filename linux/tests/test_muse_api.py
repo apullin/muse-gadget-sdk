@@ -60,3 +60,14 @@ def test_a_rejected_refresh_reports_401(monkeypatch):
 
     monkeypatch.setattr(muse_api.urllib.request, "urlopen", urlopen)
     assert muse_api.refresh_device_token("r", "homelink-abcdef") == (None, 401)
+
+
+def test_a_refused_refresh_reports_the_problem_type(monkeypatch):
+    def urlopen(req, timeout):
+        body = io.BytesIO(json.dumps({"type": "sdkTokenRevoked", "title": "x"}).encode())
+        raise muse_api.urllib.error.HTTPError(req.full_url, 403, "", {}, body)
+
+    monkeypatch.setattr(muse_api.urllib.request, "urlopen", urlopen)
+    assert muse_api.refresh_device_token_detailed("r", "homelink-abcdef", sdk_token="mgst_t") == (
+        None, 403, "sdkTokenRevoked")
+    assert muse_api.refresh_device_token("r", "homelink-abcdef") == (None, 403)

@@ -25,12 +25,16 @@ A Python package (`musegadget`) that makes any Linux computer into a Muse
 Home Link. It pairs with the Muse phone app over BLE, then holds an encrypted
 Noise session to the user's Muse VM and runs the commands Muse sends it. It is
 the Linux counterpart of the ESP32 firmware in `../esp32` and speaks the same
-pairing and control protocols, so the same app pairs either.
+pairing and control protocols, so the same app pairs either. It can also pair
+without Bluetooth, with a code (`musegadget pair --code`, experimental).
 
 | Module | Role |
 |---|---|
-| `cli.py` | `musegadget pair`, `run`, `send-user-msg`, `info`, `unpair` |
+| `cli.py` | `musegadget pair [--code]`, `run`, `send-user-msg`, `info`, `unpair` |
 | `pair.py` | `pair()`: opens BLE setup, checks and saves the pairing, prints nothing |
+| `code_pairing.py` | `pair_with_code()`: code pairing without Bluetooth, as a sealed drop (`docs/code-pairing.md`), prints nothing |
+| `hpke.py` | HPKE (RFC 9180) base mode for the X25519 / HKDF-SHA256 / AES-128-GCM suite that code pairing seals with |
+| `qr.py` | Dependency-free QR encoder (byte mode, level M, versions 1 to 10) and terminal renderer |
 | `pairing.py` | Community pairing v5: P-256 ECDH, HKDF-SHA256, AES-256-GCM, `confirm_app` |
 | `ble_framing.py` | Chunked BLE framing (`0xFE`, index, total, payload) |
 | `ble_setup.py` | Setup commands behind the GATT characteristics (no BlueZ dependency) |
@@ -74,6 +78,12 @@ uv run --no-project --isolated --python cpython-3.9-macos-x86_64 \
 The pairing tests check against the published fixtures in
 `tests/vectors/link_pairing_v5.json`. `tests/test_link_client.py` runs the
 client against an in-process fake VM that does a real Noise handshake.
+`tests/test_code_pairing_e2e.py` runs `musegadget pair --code` against the
+fake Muse in `tests/fake_drop_server.py`. `tests/test_hpke.py` checks HPKE
+against the RFC 9180 A.1.1 vector and, with `--with pyhpke`, against the
+`pyhpke` package. `tests/test_qr.py` compares the QR encoder with the `qrcode`
+package (`--with qrcode`). Both skip those checks without the package; pyhpke
+needs a newer cryptography than 3.3.2.
 
 ## Deploy to a device
 
@@ -110,7 +120,8 @@ sudo musegadget info                 # identity and pairing state
 ```
 
 State lives in `/var/lib/musegadget` (mode 0700): `identity.json` survives
-unpairing, `pairing.json` holds the device tokens. The local socket is
+unpairing, `pairing.json` holds the device tokens, and `code_pairing.json`
+holds the code pairing key and code secret until the device pairs. The local socket is
 `/run/musegadget/musegadget.sock`, owned by root and the run-as account's group.
 
 A healthy start logs `commands run as <user>`, `Noise session established`,
@@ -142,6 +153,57 @@ never has a command's parameters, output or error message.
   restarts a handshake on the same connection.
 - GATT status 133 on the phone is usually stale Bluetooth state on the phone.
   Toggling the phone's Bluetooth clears it.
+
+## Code pairing
+
+`musegadget pair --code` pairs without Bluetooth, following
+[`docs/code-pairing.md`](../docs/code-pairing.md). The device needs nothing
+from the server to start: it shows a QR code of
+`https://muse.ai/pair#v=1&n=<node id>&k=<X25519 public key>&o=<one-time code>&…`
+and redraws it every 10 seconds, when the one-time code changes. The Muse app
+seals the device tokens to that key (HPKE, `hpke.py`) and drops them on the
+server under the node id, key fingerprint and code; the device polls
+`/device_drop/poll` with its last six codes, opens the drop, and pairs. The
+server only ever holds ciphertext. Muse turns code pairing on and off; when it
+is off the command says to use Bluetooth setup. Linux gets online with the OS's
+own networking, so there is no access point here.
+
+- The X25519 key and the 32-byte code secret are in `code_pairing.json`,
+  created when the device is unpaired and has none, kept across restarts (so
+  the QR code keeps the same key), and deleted once it pairs or by
+  `musegadget unpair`. The one-time code is HOTP-SHA256 over `floor(t / 10)`.
+- Pairing stays open for 10 minutes (`--timeout`).
+- Anyone who saw the QR code can drop something. A drop that doesn't open, isn't
+  `provision_v2`, or whose tokens Muse rejects is ignored, its code is no longer
+  presented, and polling goes on.
+- With an SDK token, the device refreshes the new tokens once right away with
+  `sdk_token`, which binds the token to it. `sdkTokenDeviceLimitReached`,
+  `sdkTokenInvalid` or `sdkTokenRevoked` there leaves it unpaired. Then it
+  checks the tokens with `fetch_vms`, saves `pairing.json` as Bluetooth setup
+  does, acknowledges the drop, deletes the key and code secret, and prints
+  `Paired to <username>`.
+- It prints `key fingerprint: <hex>` once and `pair url: <link>` each time the
+  link changes, on lines of their own, for scripts.
+- Never log the key, the code secret, one-time codes, a drop or tokens.
+
+To try it with no Muse or phone, run the fake Muse and play the Muse app from a
+second shell with the link the command printed:
+
+```sh
+python3 tests/fake_drop_server.py --port 0 --interval 1    # prints {"port": N, "base_url": ...}
+MUSEGADGET_STATE_DIR=/tmp/mg MUSEGADGET_SDK_TOKEN=mgst_… \
+  musegadget pair --code --api-url http://127.0.0.1:N
+curl -d '{"url": "<pair url>"}' http://127.0.0.1:N/_fake/approve
+```
+
+`/_fake/approve` mints fake tokens, seals them to the key in the link and drops
+them under its code. To play the app yourself, get tokens from
+`POST /_fake/mint`, seal your own payload and `POST /_fake/deliver` it.
+`GET /_fake/drops` shows waiting drops, acks and bound SDK tokens;
+`GET /_fake/requests` shows what the device sent, secrets redacted. `--help`
+lists the knobs (`--slow-down-on-poll`, `--rate-limit-poll`,
+`--refresh-sdk-error`, `--unavailable`, `--drop-ttl`, ...). The fake server is
+test scaffolding, not part of the contract.
 
 ## Talking to the Muse
 

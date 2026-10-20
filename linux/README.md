@@ -71,6 +71,22 @@ That's it: the device connects to Muse and stays connected, across reboots.
 Pairing is open for 10 minutes. To pair again later, run
 `sudo musegadget pair`.
 
+### Pair without Bluetooth (experimental)
+
+A machine with no Bluetooth can pair with a code instead:
+
+```sh
+sudo musegadget pair --code
+```
+
+It shows a QR code that changes every 10 seconds. Scan it with the Muse app and
+approve the device. The app encrypts the device's tokens to a key that never
+leaves the machine, so Muse's servers only pass them along. Scan only a code
+shown by a machine in front of you: a photo of it stops working within a
+minute. Pairing stays open for 10 minutes. Muse turns code pairing on and off;
+when it's off, the command tells you to use Bluetooth setup instead. The
+machine uses its own network connection, so there is no Wi-Fi step.
+
 Every setup creates a fresh encrypted session, and pairing only opens when you
 run the installer or `musegadget pair` on the machine itself. Because these are
 community devices, pairing has no manufacturer verification and can't prevent
@@ -133,6 +149,7 @@ sudo musegadget info                     # name, node id, SDK token and pairing 
 sudo systemctl status musegadget         # is it running?
 sudo journalctl -u musegadget -f         # follow the log
 sudo musegadget pair                     # pair again
+sudo musegadget pair --code              # pair again without Bluetooth
 bash install.sh --uninstall              # remove it (add --purge to forget the pairing)
 ```
 
@@ -144,7 +161,11 @@ From this directory, with [uv](https://docs.astral.sh/uv/):
 uv run --with pytest --with . pytest
 ```
 
-The tests run anywhere, with no Bluetooth or Muse needed. To try a change on a
+The tests run anywhere, with no Bluetooth or Muse needed. Add `--with qrcode`
+and `--with pyhpke` to also check the QR encoder and the encryption against
+those packages.
+`tests/fake_drop_server.py` is a fake Muse for trying code pairing locally;
+see [`AGENTS.md`](AGENTS.md). To try a change on a
 device, copy this directory to it and run `bash install.sh --from .`.
 
 ## Community
