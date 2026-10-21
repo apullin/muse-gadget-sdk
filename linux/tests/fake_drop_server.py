@@ -310,6 +310,12 @@ class FakeDropServer:
                 raise _Problem(400, "invalidRequest", "otp")
             if not _valid_sealed(sealed):
                 raise _Problem(400, "invalidRequest", "sealed must be {v: 1, enc, ct}")
+            # Like Muse: one pending drop per (node_id, key_fingerprint, otp).
+            self._expire()
+            if any((d.node_id, d.key_fingerprint, d.otp) == (node_id, key_fingerprint, otp)
+                   for d in self._drops):
+                raise _Problem(409, "dropAlreadyDelivered",
+                               "a drop is already waiting under this code; wait for the next code")
             self._drops.append(_Drop(node_id, key_fingerprint, otp, sealed, ack_hash,
                                      time.monotonic(), source))
             return {"ok": True, "node_id": node_id, "key_fingerprint": key_fingerprint, "otp": otp}

@@ -111,6 +111,9 @@ def test_approve_takes_a_slow_screen_link(fake):
     device = Device(fake)
     status, approved = control(fake, "approve", {"url": device.link(7) + "&s=45"})
     assert status == 200 and approved["otp"] == device.code(7)
+    # Like Muse, one pending drop per code: the app waits for the next code.
+    status, again = control(fake, "approve", {"url": device.link(7) + "&s=45"})
+    assert (status, again["type"]) == (409, "dropAlreadyDelivered")
 
 
 def test_approve_seals_provision_v2_to_the_key_in_the_link(fake):
