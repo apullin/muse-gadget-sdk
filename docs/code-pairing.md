@@ -105,7 +105,8 @@ with HMAC-SHA256 and 8 Crockford base32 characters:
 
 `c` is `floor(t / 10)`, where `t` is the gadget's own clock in seconds. Nothing
 is synchronized with the server, so any clock that advances steadily works,
-including one that restarts from zero at boot.
+including one that restarts from zero at boot. A gadget whose screen redraws
+slowly uses a longer step (see [Gadgets with a slow screen](#gadgets-with-a-slow-screen)).
 
 Test vectors, for the code secret `00 01 02 … 1f` (the bytes 0 to 31):
 
@@ -162,7 +163,7 @@ While pairing, every `interval` seconds (5 to begin with):
 |---|---|---|
 | `node_id` | yes | As in the QR code. 1 to 128 printable ASCII characters, no spaces. |
 | `key_fingerprint` | yes | The fingerprint of `device_pubkey`. |
-| `recent_otps` | yes | The codes for `c`, `c-1`, … `c-5`: the last 60 seconds, newest first. 1 to 8 entries (see claim stickers). |
+| `recent_otps` | yes | The codes for `c`, `c-1`, … `c-5`: the last 60 seconds, newest first (on a longer step, the last three steps). 1 to 8 entries (see claim stickers). |
 | `sdk_token` | no | The maker's SDK token, for a community gadget. Used only to attribute and rate-limit polls. |
 
 `200`, once the Muse app has dropped a payload filed under one of those codes:
@@ -260,6 +261,16 @@ so a junk drop can't shadow the real one.
 5. Delete the key pair and the code secret, stop polling, and show "Paired to
    `username`" if the payload had one, so the owner sees which account the
    gadget joined.
+
+## Gadgets with a slow screen
+
+An e-paper refresh takes seconds (about 15 on a 4-inch E Ink Spectra 6
+panel), so a QR code that changes every 10 seconds would never stand still.
+Such a gadget uses a longer step `s` (the SDK uses 45 seconds, at most 120):
+`c` is `floor(t / s)`, the QR code is redrawn each step, and `recent_otps`
+carries the codes of the last three steps. The server never computes codes,
+so it needs nothing for this. A photographed QR code stays good for up to
+three steps instead of 60 seconds.
 
 ## Gadgets without a screen
 

@@ -478,11 +478,14 @@ complete and stops BLE through the same function).
   and default to the Wi-Fi manager; an Ethernet or cellular link plugs in by
   defining both (they map one to one onto a `net_link_up()` /
   `net_link_wait_up()` pair).
-- **Screen:** colour LCDs draw the QR code (`CONFIG_GADGET_CODE_PAIRING_QR`,
+- **Screen:** status screens draw the QR code (`CONFIG_GADGET_CODE_PAIRING_QR`,
   default on, uses `espressif/qrcode`) with "Scan with the Muse app" under it,
-  redrawn every 10 s. E-paper and other boards show "Pair in the Muse app" and
-  print the link on the serial console every 10 s; LED-only boards breathe
-  cyan (`LED_STATE_CODE_PAIRING`). After pairing, "Paired to <name>".
+  redrawn each time the code changes: every 10 s on colour LCDs, every
+  `CONFIG_GADGET_CODE_PAIRING_EPAPER_STEP_S` (45 s) on e-paper, whose refresh
+  takes seconds (`code_pairing_config_t.step_s`; a poll then carries the codes
+  of the last three steps). Boards without a screen print the link on the
+  serial console; LED-only boards breathe cyan (`LED_STATE_CODE_PAIRING`).
+  After pairing, "Paired to <name>".
 - **Keys:** the X25519 private key (`cp_key`) and the one-time-code secret
   (`cp_otp`) live in NVS, are made when missing, survive restarts, and are
   deleted after pairing and by a setup reset (`config_clear_setup()`). A claim

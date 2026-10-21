@@ -304,8 +304,21 @@ size_t code_pairing_link(const code_pairing_config_t *cfg,
 
 // ---- Scheduling -----------------------------------------------------------------------
 
-static uint64_t counter_at(uint64_t now) {
-    return now / 1000u / CODE_PAIRING_STEP_S;
+static uint32_t step_s(const code_pairing_t *cp) {
+    return cp->cfg.step_s > CODE_PAIRING_STEP_S ? cp->cfg.step_s : CODE_PAIRING_STEP_S;
+}
+
+static uint64_t counter_at(const code_pairing_t *cp, uint64_t now) {
+    return now / 1000u / step_s(cp);
+}
+
+// How many recent codes a poll carries: the last 60 seconds' worth, and on a
+// longer step at least the last three, so a code is still good while a slow
+// screen draws it and someone scans it.
+static int recent_codes(const code_pairing_t *cp) {
+    uint32_t s = step_s(cp);
+    int n = (int)((CODE_PAIRING_RECENT_OTPS * CODE_PAIRING_STEP_S + s - 1) / s);
+    return s > CODE_PAIRING_STEP_S && n < 3 ? 3 : n;
 }
 
 static uint32_t ms_until(uint64_t now, uint64_t at) {
@@ -318,7 +331,7 @@ static uint32_t min_u32(uint32_t a, uint32_t b) { return a < b ? a : b; }
 
 // Shows the QR code again when the code has changed.
 static void refresh_code(code_pairing_t *cp, uint64_t now) {
-    uint64_t c = counter_at(now);
+    uint64_t c = counter_at(cp, now);
     if (cp->shown && c == cp->shown_counter) return;
     cp->shown_counter = c;
     cp->shown = true;
@@ -336,7 +349,7 @@ static void refresh_code(code_pairing_t *cp, uint64_t now) {
 // The wait until the next thing to do: a poll, a new code, or the end of the
 // window.
 static uint32_t next_wake(code_pairing_t *cp, uint64_t now) {
-    uint64_t next_code = (counter_at(now) + 1) * CODE_PAIRING_STEP_S * 1000u;
+    uint64_t next_code = (counter_at(cp, now) + 1) * step_s(cp) * 1000u;
     uint32_t d = min_u32(ms_until(now, cp->next_poll_ms), ms_until(now, next_code));
     return min_u32(d, ms_until(now, cp->window_end_ms));
 }
@@ -434,8 +447,9 @@ static char *poll_body(code_pairing_t *cp, uint64_t now) {
     cJSON_AddStringToObject(root, "node_id", cp->cfg.node_id ? cp->cfg.node_id : "");
     cJSON_AddStringToObject(root, "key_fingerprint", cp->fingerprint);
     cJSON *otps = cJSON_AddArrayToObject(root, "recent_otps");
-    uint64_t c = counter_at(now);
-    for (int i = 0; otps && i < CODE_PAIRING_RECENT_OTPS && (uint64_t)i <= c; i++) {
+    uint64_t c = counter_at(cp, now);
+    int n = recent_codes(cp);
+    for (int i = 0; otps && i < n && (uint64_t)i <= c; i++) {
         char otp[CODE_PAIRING_OTP_LEN + 1];
         code_pairing_otp(cp->secret, c - (uint64_t)i, otp);
         if (!skipped(cp, otp)) cJSON_AddItemToArray(otps, cJSON_CreateString(otp));
@@ -548,7 +562,7 @@ static uint32_t step_poll(code_pairing_t *cp) {
         cp->net_logged = true;
         // Wake for the next code too: the QR code changes every 10 s.
         uint32_t wait = next_wake(cp, now);
-        if (wait == 0) wait = ms_until(now, (counter_at(now) + 1) * CODE_PAIRING_STEP_S * 1000u);
+        if (wait == 0) wait = ms_until(now, (counter_at(cp, now) + 1) * step_s(cp) * 1000u);
         bool up = cp->p->net_wait_up && cp->p->net_wait_up(cp->p->ctx, wait ? wait : 1);
         return up ? 0 : next_wake(cp, now_ms(cp));
     }

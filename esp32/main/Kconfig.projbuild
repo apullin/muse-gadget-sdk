@@ -86,10 +86,21 @@ menu "ESP32 Device SDK"
         depends on GADGET_CODE_PAIRING
         default y
         help
-            Draws the pairing link as a QR code on boards with a colour status
-            screen, again every 10 seconds as its one-time code changes, with
-            the espressif/qrcode component. Without it (and on e-paper), the
-            link goes to the serial console.
+            Draws the pairing link as a QR code on boards with a status
+            screen, again each time its one-time code changes, with the
+            espressif/qrcode component. Without it, the link goes to the
+            serial console.
+
+    config GADGET_CODE_PAIRING_EPAPER_STEP_S
+        int "How often the code changes on e-paper (seconds)"
+        depends on GADGET_CODE_PAIRING_QR
+        range 10 120
+        default 45
+        help
+            Colour screens show a new one-time code every 10 seconds. An
+            e-paper refresh takes seconds (about 15 on Spectra 6), so on
+            e-paper the code changes this often instead, and each code stays
+            good for three of these periods so it can be drawn and scanned.
 
     config GADGET_CODE_PAIRING_WINDOW_S
         int "How long pairing stays open (seconds)"

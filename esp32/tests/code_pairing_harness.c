@@ -992,6 +992,55 @@ static void scenario_stale_code(void) {
     check_no_secrets_logged();
 }
 
+// E-paper: a 45 s step. The QR code is redrawn once a step, a poll carries the
+// codes of the last three steps, and older codes are never presented.
+#define SLOW_STEP_MS 45000u
+
+static void slow_drop(int age) {
+    app_drop_as(0, MIN_PAYLOAD, NULL, NULL);
+    otp_at(F.now / SLOW_STEP_MS - (uint64_t)age, F.drops[F.drop_count - 1].otp);
+}
+
+static void scenario_slow_step(void) {
+    code_pairing_t cp;
+    code_pairing_config_t cfg = default_cfg();
+    cfg.step_s = SLOW_STEP_MS / 1000u;
+    code_pairing_init(&cp, &PLATFORM, &cfg);
+    code_pairing_start(&cp);
+    code_pairing_state_t st;
+    // T0 is 35 s before a step boundary: 90 s cross two.
+    run_until(&cp, 1000, T0 + 90000, &st);
+    CHECK_EQ(st, CODE_PAIRING_WAITING);
+    CHECK_EQ(F.show_code_count, 3);
+    char otp[9], want[16];
+    otp_at(F.now / SLOW_STEP_MS, otp);
+    snprintf(want, sizeof(want), "&o=%s&", otp);
+    CHECK(strstr(F.shown_link, want));
+
+    run_polls(&cp, 1, &st);
+    cJSON *poll = request_json(nth_poll(F.polls - 1));
+    cJSON *otps = cJSON_GetObjectItemCaseSensitive(poll, "recent_otps");
+    int n = 0;
+    for (cJSON *o = otps ? otps->child : NULL; o; o = o->next, n++) {
+        otp_at(F.now / SLOW_STEP_MS - (uint64_t)n, otp);
+        CHECK(cJSON_IsString(o) && strcmp(o->valuestring, otp) == 0);
+    }
+    CHECK_EQ(n, 3);
+    cJSON_Delete(poll);
+
+    // Three steps old: never presented.
+    slow_drop(3);
+    run_polls(&cp, 3, &st);
+    CHECK_EQ(st, CODE_PAIRING_WAITING);
+    CHECK_EQ(F.save_count, 0);
+    // Two steps old: still good.
+    slow_drop(2);
+    run_polls(&cp, 1, &st);
+    run(&cp, 5, &st);
+    CHECK_EQ(st, CODE_PAIRING_PAIRED);
+    check_no_secrets_logged();
+}
+
 static void scenario_wrong_fingerprint_or_code(void) {
     code_pairing_t cp;
     code_pairing_config_t cfg = default_cfg();
@@ -1719,6 +1768,7 @@ static const struct {
     {"happy_path", scenario_happy_path},
     {"pending_then_drop", scenario_pending_then_drop},
     {"stale_code", scenario_stale_code},
+    {"slow_step", scenario_slow_step},
     {"wrong_fingerprint_or_code", scenario_wrong_fingerprint_or_code},
     {"junk_ignored", scenario_junk_ignored},
     {"binding_refresh", scenario_binding_refresh},

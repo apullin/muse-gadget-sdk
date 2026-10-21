@@ -399,8 +399,11 @@ static void qr_render(esp_qrcode_handle_t qr) {
     if (!led_status_display_info(&w, &h) || w <= 0 || h <= 0) return;
     const char *caption = s_qr_caption ? s_qr_caption : "";
     int n = (int)strlen(caption);
+    // A margin at each side: on some boards the panel's edge sits under the
+    // case.
+    int text_max_w = w - w / 10;
     int ts = 4;
-    while (ts > 1 && n * (PIXEL_FONT_WIDTH + 1) * ts > w) ts--;
+    while (ts > 1 && n * (PIXEL_FONT_WIDTH + 1) * ts > text_max_w) ts--;
     int text_w = n * (PIXEL_FONT_WIDTH + 1) * ts;
     int text_h = PIXEL_FONT_HEIGHT * ts;
     int area_h = h - text_h - 2 * ts;
@@ -412,7 +415,7 @@ static void qr_render(esp_qrcode_handle_t qr) {
         quiet = 1;
         scale = side / (size + 2 * quiet);
     }
-    if (scale < 1 || text_w > w) {
+    if (scale < 1 || text_w > text_max_w) {
         ESP_LOGW(TAG, "screen too small for the QR code");
         return;
     }
@@ -451,9 +454,13 @@ static void qr_render(esp_qrcode_handle_t qr) {
     }
 }
 
+// Status screens with fewer than 16 bits per pixel are e-paper.
+static bool epaper(void) {
+    int bits = led_status_display_bits();
+    return bits > 0 && bits < 16;
+}
+
 static bool show_qr(const char *text, const char *caption) {
-    // Colour LCDs only: e-paper can't redraw every 10 seconds.
-    if (led_status_display_bits() < 16) return false;
     s_qr_caption = caption;
     s_qr_drawn = false;
     esp_qrcode_config_t cfg = {
@@ -475,8 +482,9 @@ static void clear_code(void) {
     led_status_set_title(NULL);
 }
 
-// Called again every 10 s with the new code. The link carries this gadget's
-// public key and a one-time code, never the SDK token.
+// Called again each time the code changes (every 10 s, or
+// CONFIG_GADGET_CODE_PAIRING_EPAPER_STEP_S on e-paper). The link carries this
+// gadget's public key and a one-time code, never the SDK token.
 static void p_show_code(void *ctx, const char *link, const char *fingerprint,
                         uint32_t remaining_s) {
     (void)ctx;
@@ -651,6 +659,11 @@ static void configure(void) {
         .sdk_token = identity_sdk_token(),
         .claim_code = s_claim[0] ? s_claim : NULL,
         .window_s = CONFIG_GADGET_CODE_PAIRING_WINDOW_S,
+#if CONFIG_GADGET_CODE_PAIRING_QR
+        // E-paper takes seconds to redraw the QR code, so its code changes
+        // less often.
+        .step_s = epaper() ? CONFIG_GADGET_CODE_PAIRING_EPAPER_STEP_S : 0,
+#endif
     };
     code_pairing_init(&s_cp, &PLATFORM, &cfg);
 }

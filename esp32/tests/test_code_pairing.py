@@ -179,6 +179,9 @@ class CodePairingHarnessTest(unittest.TestCase):
     def test_stale_code(self) -> None:
         self._run("stale_code")
 
+    def test_slow_step(self) -> None:
+        self._run("slow_step")
+
     def test_wrong_fingerprint_or_code(self) -> None:
         self._run("wrong_fingerprint_or_code")
 

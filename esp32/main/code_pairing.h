@@ -80,7 +80,8 @@ typedef enum {
 #define CODE_PAIRING_OTP_LEN 8
 // 16 lowercase hex characters and the NUL.
 #define CODE_PAIRING_FINGERPRINT_LEN 17
-// The codes for c, c-1 ... c-5: the last 60 seconds.
+// The codes for c, c-1 ... c-5: the last 60 seconds. On a longer step, a
+// poll carries the last 60 seconds' worth and at least the last three.
 #define CODE_PAIRING_RECENT_OTPS 6
 #define CODE_PAIRING_STEP_S 10
 #define CODE_PAIRING_WINDOW_S 600
@@ -157,6 +158,9 @@ typedef struct {
     // A claim sticker's code (8 characters), added to every poll; NULL if none.
     const char *claim_code;
     uint32_t window_s;       // 0: CODE_PAIRING_WINDOW_S
+    // How often the code changes; 0 (or less than CODE_PAIRING_STEP_S):
+    // CODE_PAIRING_STEP_S. Longer on screens that redraw slowly (e-paper).
+    uint32_t step_s;
 } code_pairing_config_t;
 
 typedef struct {
