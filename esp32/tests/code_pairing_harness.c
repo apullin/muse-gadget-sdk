@@ -879,6 +879,14 @@ static void scenario_link(void) {
     cfg.wifi = 0;  // unset: none
     code_pairing_link(&cfg, pk, "J66JQ2A2", link, sizeof(link));
     CHECK(strstr(link, "&w=n&"));
+    // A slow screen's step goes last; the usual 10 s (or less) is left out.
+    cfg.step_s = 10;
+    code_pairing_link(&cfg, pk, "J66JQ2A2", link, sizeof(link));
+    CHECK(!strstr(link, "&s="));
+    cfg.step_s = 45;
+    code_pairing_link(&cfg, pk, "J66JQ2A2", link, sizeof(link));
+    const char *tail = "&c=0&s=45";
+    CHECK(strlen(link) > strlen(tail) && strcmp(link + strlen(link) - strlen(tail), tail) == 0);
     // The SDK token never goes in it.
     CHECK(!strstr(link, "mgst_"));
 }
@@ -1016,6 +1024,7 @@ static void scenario_slow_step(void) {
     otp_at(F.now / SLOW_STEP_MS, otp);
     snprintf(want, sizeof(want), "&o=%s&", otp);
     CHECK(strstr(F.shown_link, want));
+    CHECK(strstr(F.shown_link, "&s=45"));
 
     run_polls(&cp, 1, &st);
     cJSON *poll = request_json(nth_poll(F.polls - 1));

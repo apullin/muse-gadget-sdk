@@ -295,6 +295,12 @@ size_t code_pairing_link(const code_pairing_config_t *cfg,
               && append_raw(out, out_cap, &len, w)
               && append_raw(out, out_cap, &len, cfg->mgcommands ? "&g=1" : "&g=0")
               && append_raw(out, out_cap, &len, cfg->community ? "&c=1" : "&c=0");
+    // A longer step than the usual 10 s: say so, for the app's freshness note.
+    if (ok && cfg->step_s > CODE_PAIRING_STEP_S) {
+        char step[16];
+        snprintf(step, sizeof(step), "&s=%u", (unsigned)cfg->step_s);
+        ok = append_raw(out, out_cap, &len, step);
+    }
     if (!ok) {
         out[0] = '\0';
         return 0;

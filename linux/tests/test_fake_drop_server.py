@@ -106,6 +106,13 @@ def test_malformed_polls(fake, over, detail):
     assert (status, answer["type"], answer["detail"]) == (400, "invalidRequest", detail)
 
 
+def test_approve_takes_a_slow_screen_link(fake):
+    # A gadget with a slow screen adds its code step (s=) to the link.
+    device = Device(fake)
+    status, approved = control(fake, "approve", {"url": device.link(7) + "&s=45"})
+    assert status == 200 and approved["otp"] == device.code(7)
+
+
 def test_approve_seals_provision_v2_to_the_key_in_the_link(fake):
     fake.configure(api_url_v2="https://api.example.test", noise_host="noise.example.test")
     device = Device(fake)

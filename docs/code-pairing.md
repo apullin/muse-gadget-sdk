@@ -122,7 +122,7 @@ Test vectors, for the code secret `00 01 02 … 1f` (the bytes 0 to 31):
 Show the QR code while pairing, and draw it again whenever `c` changes:
 
 ```
-https://muse.ai/pair#v=1&n=<node_id>&k=<device_pubkey>&o=<code>&m=<model>&w=<wifi>&g=<mgcommands>&c=<community>
+https://muse.ai/pair#v=1&n=<node_id>&k=<device_pubkey>&o=<code>&m=<model>&w=<wifi>&g=<mgcommands>&c=<community>[&s=<step>]
 ```
 
 | Key | Value |
@@ -135,6 +135,7 @@ https://muse.ai/pair#v=1&n=<node_id>&k=<device_pubkey>&o=<code>&m=<model>&w=<wif
 | `w` | Wi-Fi need: `n` none, `o` optional, `r` required |
 | `g` | `1` if the gadget also serves gadget commands over Bluetooth, else `0` |
 | `c` | `1` for a community gadget (built with this SDK, paired with an SDK token), else `0` |
+| `s` | Only when the code changes less often than every 10 seconds: the step, in seconds (see [Gadgets with a slow screen](#gadgets-with-a-slow-screen)). The app uses it to say how long to wait for the next code, and how long a code stays good. |
 
 Values are percent-encoded as in a URL query; ids made of letters, digits, `-`,
 `_` and `.` need no encoding. The parameters are in the fragment so that a
@@ -267,8 +268,8 @@ so a junk drop can't shadow the real one.
 An e-paper refresh takes seconds (about 15 on a 4-inch E Ink Spectra 6
 panel), so a QR code that changes every 10 seconds would never stand still.
 Such a gadget uses a longer step `s` (the SDK uses 45 seconds, at most 120):
-`c` is `floor(t / s)`, the QR code is redrawn each step, and `recent_otps`
-carries the codes of the last three steps. The server never computes codes,
+`c` is `floor(t / s)`, the QR code is redrawn each step and its link carries
+`s=<s>`, and `recent_otps` carries the codes of the last three steps. The server never computes codes,
 so it needs nothing for this. A photographed QR code stays good for up to
 three steps instead of 60 seconds.
 
