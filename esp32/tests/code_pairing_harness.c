@@ -283,13 +283,13 @@ typedef struct {
 typedef struct {
     bool have_keys;
     uint8_t sk[32];
-    uint8_t secret[32];
     int generated;
     int erased;
 } nvs_t;
 
 typedef struct {
     uint64_t now;
+    uint8_t secret[32];
     // Scripted answers go first; with none left, the fake server answers.
     answer_t answers[MAX_ANSWERS];
     int answer_count, answer_next;
@@ -327,6 +327,7 @@ typedef struct {
 
 static fake_t F;
 static nvs_t NVS;
+static unsigned random_window;
 static code_pairing_platform_t PLATFORM;
 
 #define T0 1000000u  // the clock at the start of each scenario: counter 100
@@ -348,6 +349,7 @@ static void fake_restart(void) {
 }
 
 static void fake_reset(void) {
+    random_window = 0;
     F.ops = &FAKE_OPS;
     fake_restart();
     memset(&NVS, 0, sizeof(NVS));
@@ -485,6 +487,11 @@ static uint64_t f_now(void *ctx) {
 static bool f_random(void *ctx, uint8_t *out, size_t len) {
     (void)ctx;
     memset(out, 0, len);  // no jitter: keeps the timings exact
+    if (len == 32) {
+        ++random_window;  // simulated CSPRNG state survives the device reboot
+        for (size_t i = 0; i < len; i++) out[i] = (uint8_t)(i + 17 * random_window);
+        memcpy(F.secret, out, len);
+    }
     return true;
 }
 
@@ -493,20 +500,18 @@ static void device_pk(uint8_t pk[32]) {
     CHECK(F.ops->x25519(NULL, NVS.sk, BASEPOINT, pk));
 }
 
-static bool f_load_keys(void *ctx, uint8_t pubkey[32], uint8_t secret[32]) {
+static bool f_load_keys(void *ctx, uint8_t pubkey[32]) {
     (void)ctx;
     if (!F.keys_ok) return false;
     if (!NVS.have_keys) {
         NVS.generated++;
         for (int i = 0; i < 32; i++) {
             NVS.sk[i] = (uint8_t)(0x40 + i + 31 * NVS.generated);
-            NVS.secret[i] = (uint8_t)(i + 17 * NVS.generated);
         }
         NVS.have_keys = true;
     }
     memcpy(C.recipient_sk, NVS.sk, 32);
     device_pk(pubkey);
-    memcpy(secret, NVS.secret, 32);
     return true;
 }
 
@@ -514,7 +519,7 @@ static void f_erase_keys(void *ctx) {
     (void)ctx;
     NVS.have_keys = false;
     memset(NVS.sk, 0, 32);
-    memset(NVS.secret, 0, 32);
+    memset(F.secret, 0, 32);
     NVS.erased++;
 }
 
@@ -643,7 +648,7 @@ static uint64_t counter_now(void) {
 
 static void otp_at(uint64_t c, char out[9]) {
     CHECK(NVS.have_keys);
-    code_pairing_otp(NVS.secret, c, out);
+    code_pairing_otp(F.secret, c, out);
 }
 
 static void fingerprint_now(char fp[CODE_PAIRING_FINGERPRINT_LEN]) {
@@ -936,8 +941,8 @@ static void scenario_happy_path(void) {
     CHECK_STR(F.saved_access, "ACCESS-SECRET-bound");
     CHECK_STR(F.saved_refresh, "REFRESH-SECRET-bound");
     CHECK_STR(F.saved_device, NODE);
-    CHECK_STR(F.saved_api, "https://api2.example.test");
-    CHECK_STR(F.saved_noise, "vm.example.test");
+    CHECK_STR(F.saved_api, "https://api.example.test");
+    CHECK(F.saved_noise_null);
     CHECK_STR(F.saved_user, "person");
     // The ack, with the code the drop was filed under.
     int ack = F.request_count - 1;
@@ -1180,8 +1185,7 @@ static void scenario_binding_refresh(void) {
     CHECK_EQ(st, CODE_PAIRING_PAIRED);
     CHECK_EQ(F.save_count, 1);
 
-    // No verdict (a 400, a 5xx, no answer, a Muse that doesn't take sdk_token
-    // on refresh yet): keep the payload's tokens and go on.
+    // No verdict: retry binding before verification or storage.
     fake_reset();
     code_pairing_init(&cp, &PLATFORM, &cfg);
     code_pairing_start(&cp);
@@ -1190,8 +1194,9 @@ static void scenario_binding_refresh(void) {
     F.bind_scripted = 1;
     run(&cp, 20, &st);
     CHECK_EQ(st, CODE_PAIRING_PAIRED);
-    CHECK_STR(F.verified_with, "ACCESS-SECRET");
-    CHECK_STR(F.saved_access, "ACCESS-SECRET");
+    CHECK_EQ(F.bind_calls, 2);
+    CHECK_STR(F.verified_with, "ACCESS-SECRET-bound");
+    CHECK_STR(F.saved_access, "ACCESS-SECRET-bound");
 
     // No SDK token: no binding refresh, and none in the poll.
     fake_reset();
@@ -1330,7 +1335,7 @@ static void scenario_reboot_keeps_keys(void) {
     snprintf(link, sizeof(link), "%s", F.shown_link);
 
     // Restart: the same storage, a fresh machine; at the same counter it
-    // shows the very same QR code.
+    // shows a fresh QR code while keeping the recipient key.
     fake_restart();
     F.now = at;
     code_pairing_t cp2;
@@ -1338,7 +1343,7 @@ static void scenario_reboot_keeps_keys(void) {
     code_pairing_start(&cp2);
     CHECK_EQ(NVS.generated, 1);
     CHECK_STR(F.shown_fp, fp);
-    CHECK_STR(F.shown_link, link);
+    CHECK(strcmp(F.shown_link, link) != 0);
     app_drop(MIN_PAYLOAD);
     run(&cp2, 20, &st);
     CHECK_EQ(st, CODE_PAIRING_PAIRED);
@@ -1395,6 +1400,9 @@ static void scenario_window(void) {
     code_pairing_start(&cp);
     CHECK_EQ(code_pairing_state(&cp), CODE_PAIRING_WAITING);
     CHECK_EQ(NVS.generated, 1);
+    run_polls(&cp, 1, &st);
+    CHECK_EQ(F.save_count, 0);  // previous window's drop must not revive
+    app_drop(MIN_PAYLOAD);     // a new scan of the fresh code
     run(&cp, 20, &st);
     CHECK_EQ(st, CODE_PAIRING_PAIRED);
 
@@ -1413,8 +1421,7 @@ static void scenario_verify(void) {
     code_pairing_config_t cfg = default_cfg();
     cfg.sdk_token = NULL;
     code_pairing_state_t st;
-    // fetch_vms gives no verdict: nothing saved; the drop is still on the
-    // server, so the next poll brings it back, and then it works.
+    // fetch_vms gives no verdict: keep pending tokens in RAM and retry.
     code_pairing_init(&cp, &PLATFORM, &cfg);
     code_pairing_start(&cp);
     app_drop(MIN_PAYLOAD);
@@ -1423,7 +1430,7 @@ static void scenario_verify(void) {
     run(&cp, 20, &st);
     CHECK_EQ(st, CODE_PAIRING_PAIRED);
     CHECK_EQ(F.verify_calls, 2);
-    CHECK_EQ(F.polls, 2);
+    CHECK_EQ(F.polls, 1);
     CHECK_EQ(F.save_count, 1);
 
     // 401/403: the tokens aren't real. Ignored, its code left out, still
@@ -1463,6 +1470,85 @@ static void scenario_verify(void) {
     CHECK_EQ(code_pairing_state(&cp), CODE_PAIRING_ERROR);
     CHECK_EQ(code_pairing_step(&cp, &st), CODE_PAIRING_NO_STEP);
     CHECK_EQ(F.request_count, 0);
+}
+
+static void scenario_security(void) {
+    code_pairing_t cp;
+    code_pairing_state_t st;
+    code_pairing_config_t cfg = default_cfg();
+    code_pairing_platform_t p = PLATFORM;
+    p.verify_tokens = NULL;
+    code_pairing_init(&cp, &p, &cfg);
+    code_pairing_start(&cp);
+    CHECK_STR(code_pairing_last_problem(&cp), "tokenVerifier");
+    CHECK_EQ(F.polls, 0);
+    p = PLATFORM;
+    p.bind_tokens = NULL;
+    code_pairing_init(&cp, &p, &cfg);
+    code_pairing_start(&cp);
+    CHECK_STR(code_pairing_last_problem(&cp), "tokenVerifier");
+    p = PLATFORM;
+    p.random_bytes = NULL;
+    code_pairing_init(&cp, &p, &cfg);
+    code_pairing_start(&cp);
+    CHECK_STR(code_pairing_last_problem(&cp), "randomSource");
+    CHECK_EQ(F.save_count, 0);
+
+    // A server response cannot revive an old, unrequested code.
+    fake_reset();
+    code_pairing_init(&cp, &PLATFORM, &cfg);
+    code_pairing_start(&cp);
+    app_drop_as(7, MIN_PAYLOAD, NULL, NULL);
+    size_t n = strlen(F.drops[0].sealed) + 64;
+    char *answer = malloc(n);
+    CHECK(answer);
+    snprintf(answer, n, "{\"sealed\":%s,\"otp\":\"%s\"}", F.drops[0].sealed, F.drops[0].otp);
+    push_owned(200, answer);
+    run_polls(&cp, 2, &st);
+    CHECK_EQ(F.bind_calls, 0);
+    CHECK_EQ(F.save_count, 0);
+    code_pairing_stop(&cp);
+
+    // Binding and verification outages expire without saving or acknowledging.
+    for (int verify = 0; verify < 2; verify++) {
+        fake_reset();
+        cfg.window_s = 10;
+        code_pairing_init(&cp, &PLATFORM, &cfg);
+        code_pairing_start(&cp);
+        app_drop(FULL_PAYLOAD);
+        if (verify) {
+            F.verify_results[0] = CODE_PAIRING_RESULT_RETRY;
+            F.verify_count = 1;
+        } else {
+            F.bind_results[0] = CODE_PAIRING_RESULT_RETRY;
+            F.bind_scripted = 1;
+        }
+        run(&cp, 100, &st);
+        CHECK_EQ(st, CODE_PAIRING_EXPIRED);
+        CHECK_EQ(F.save_count, 0);
+        CHECK_EQ(F.acks, 0);
+        CHECK(NVS.have_keys);
+        CHECK(cp.access_token == NULL && cp.refresh_token == NULL);
+        if (verify) CHECK_STR(F.verified_with, "ACCESS-SECRET-bound");
+        else CHECK_EQ(F.verify_calls, 0);
+    }
+
+    // Retain rotated tokens across verification retries, without a second bind.
+    fake_reset();
+    cfg.window_s = 60;
+    code_pairing_init(&cp, &PLATFORM, &cfg);
+    code_pairing_start(&cp);
+    app_drop(FULL_PAYLOAD);
+    F.verify_results[0] = CODE_PAIRING_RESULT_RETRY;
+    F.verify_count = 1;
+    run(&cp, 100, &st);
+    CHECK_EQ(st, CODE_PAIRING_PAIRED);
+    CHECK_EQ(F.bind_calls, 1);
+    CHECK_EQ(F.verify_calls, 2);
+    CHECK_EQ(F.polls, 1);
+    CHECK_STR(F.verified_with, "ACCESS-SECRET-bound");
+    CHECK_STR(F.saved_api, cfg.base_url);
+    CHECK(F.saved_noise_null);
 }
 
 static void scenario_claim_code(void) {
@@ -1673,7 +1759,7 @@ static void scenario_hpke_vectors(void) {
     NVS.have_keys = true;
     NVS.generated = 1;
     unhex(jstr(vec, "device_sk"), NVS.sk, 32);
-    for (int i = 0; i < 32; i++) NVS.secret[i] = (uint8_t)i;
+    for (int i = 0; i < 32; i++) F.secret[i] = (uint8_t)i;
     memcpy(C.recipient_sk, NVS.sk, 32);
     uint8_t pk[32];
     device_pk(pk);
@@ -1790,6 +1876,7 @@ static const struct {
     {"keys_erased_after_pairing", scenario_keys_erased_after_pairing},
     {"window", scenario_window},
     {"verify", scenario_verify},
+    {"security", scenario_security},
     {"claim_code", scenario_claim_code},
     {"early_counter", scenario_early_counter},
     {"stop", scenario_stop},

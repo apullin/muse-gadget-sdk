@@ -461,18 +461,18 @@ gadget that is already online without Bluetooth, as `docs/code-pairing.md`
 describes: the gadget shows a QR code with its node id, an X25519 public key
 and a one-time code that changes every 10 seconds; the Muse app seals the
 device tokens to that key (HPKE) and drops them on the server; the gadget polls
-`/device_drop/poll` with its recent codes and opens the drop. BLE setup stays
-the default and keeps working: whichever finishes first wins
-(`complete_setup_and_stop_ble()` stops code pairing; code pairing marks setup
-complete and stops BLE through the same function).
+`/device_drop/poll` with its recent codes and opens the drop. Selecting code
+pairing keeps Bluetooth off, including setup, companion
+advertising and fallback. When unavailable it stays unpaired; a button press
+retries this route. The app/backend integration contract is experimental.
 
 - **When:** the app heartbeat opens the 10-minute window
   (`CONFIG_GADGET_CODE_PAIRING_WINDOW_S`) once the gadget is unpaired and
   `code_pairing_net_up()` says the link is up; a short press reopens it. Today
   that means a board that is online while unpaired: a Muse board that joined
-  Wi-Fi from its settings, or the `CONFIG_HOMEHUB_WIFI_SSID` dev override. A
-  plain Link board wipes Wi-Fi without tokens at boot, so it needs another
-  link (or the SoftAP below) before code pairing can start.
+  Wi-Fi from its settings, or the `CONFIG_HOMEHUB_WIFI_SSID` dev override.
+  Code-pairing builds preserve preconfigured Wi-Fi before pairing and do not
+  erase a completed pairing merely because no Wi-Fi credentials exist.
 - **Any IP link works.** `code_pairing_net_up()` and
   `code_pairing_net_wait_up(timeout_ms)` in `main/code_pairing_esp.c` are weak
   and default to the Wi-Fi manager; an Ethernet or cellular link plugs in by
@@ -486,16 +486,18 @@ complete and stops BLE through the same function).
   of the last three steps). Boards without a screen print the link on the
   serial console; LED-only boards breathe cyan (`LED_STATE_CODE_PAIRING`).
   After pairing, "Paired to <name>".
-- **Keys:** the X25519 private key (`cp_key`) and the one-time-code secret
-  (`cp_otp`) live in NVS, are made when missing, survive restarts, and are
-  deleted after pairing and by a setup reset (`config_clear_setup()`). A claim
+- **Keys:** the X25519 private key (`cp_key`) lives in NVS until pairing or
+  reset. Every window requires fresh CSPRNG output for a RAM-only code secret;
+  legacy `cp_otp` storage is erased. A reboot cannot repeat old codes. A claim
   sticker's code, if flashed, is read from `cp_claim` and added to every poll.
 - **After the drop opens:** anyone who saw the QR code can seal a payload
   that opens, so the tokens are vetted before anything is saved, at the API
   root code pairing polls: a community gadget refreshes once with its SDK token
   (`vm_api_bind_device_token()`; `sdkTokenDeviceLimitReached`,
-  `sdkTokenInvalid` or `sdkTokenRevoked` stops pairing, 401/403 means fake
-  tokens, anything else keeps the payload's), then `fetch_vms` (401/403: fake).
+  `sdkTokenInvalid` or `sdkTokenRevoked` stops pairing, 401/403 rejects the
+  candidate; other failures remain pending), then
+  `fetch_vms`. Verification retries retain rotated tokens in RAM and never
+  redo an already successful binding. Missing verifiers fail closed.
   A junk or fake drop is ignored and the code that brought it is left out of
   later polls. Vetted tokens are stored the way BLE provisioning stores them
   (`app_code_pairing_store()` in `main/app.c`), the drop is acknowledged, the
@@ -513,6 +515,9 @@ complete and stops BLE through the same function).
   when `pkg-config libcrypto` finds the host's OpenSSL.
 - Never log the private key, the code secret, a claim code, a drop or the
   tokens. The link (with its one-time code) goes to the serial console only.
+
+Code-pairing payloads cannot override API or Noise endpoints. Both binding and
+verification must succeed before storage; all retries end at the window deadline.
 
 ### SoftAP (interface only)
 

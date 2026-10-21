@@ -165,12 +165,14 @@ To reset the device and set it up again, hold the button for 5 seconds.
 
 **Pairing without Bluetooth (experimental).** Build with
 `CONFIG_GADGET_CODE_PAIRING=y` and a gadget that is already online (any IP
-link works: a known Wi-Fi network, Ethernet, cellular) also shows a QR code for
+link works: preconfigured Wi-Fi, Ethernet, cellular) shows a QR code for
 ten minutes after it boots unpaired or you press the button. Scan it in the Muse
 app; the app sends the device tokens encrypted to a key only the gadget holds.
-Bluetooth setup keeps working, and whichever finishes first wins. The protocol
-is in [docs/code-pairing.md](../docs/code-pairing.md); the firmware side is
-described in `AGENTS.md`.
+This mode keeps Bluetooth off, including companion advertising and fallback.
+If pairing is unavailable, the device stays unpaired; press the button to retry
+with a fresh code. Preconfigured Wi-Fi is retained while unpaired. Production
+use requires matching Muse app/backend support; see the integration checklist
+in [docs/code-pairing.md](../docs/code-pairing.md).
 
 On the experimental EchoEar-2ST, press the screen to confirm pairing; after
 pairing, hold the screen microphone to record and release it to send. See

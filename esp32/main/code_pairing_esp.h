@@ -17,7 +17,7 @@
 #pragma once
 
 // Runs code pairing (code_pairing.h) on its own task with the ESP-IDF
-// platform: HTTPS, an X25519 key and a one-time-code secret in NVS, PSA
+// platform: HTTPS, an X25519 key in NVS and a fresh code secret in RAM, PSA
 // Crypto, the status LED or screen. Built with CONFIG_GADGET_CODE_PAIRING.
 // Every call returns at once and is safe from any task; the work happens on
 // the code pairing task.
@@ -32,7 +32,7 @@ void code_pairing_esp_start_if_idle(void);
 // error or code pairing being off, open a new window. Does nothing while the
 // QR code is showing.
 void code_pairing_esp_restart(void);
-// Stop polling and hide the QR code (Bluetooth setup finished).
+// Stop polling and hide the QR code, discarding pending tokens and codes.
 void code_pairing_esp_stop(void);
 // Whether the QR code is showing and the gadget polling.
 bool code_pairing_esp_active(void);

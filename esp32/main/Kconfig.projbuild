@@ -65,21 +65,17 @@ menu "ESP32 Device SDK"
         bool "Code pairing: pair without Bluetooth (experimental)"
         default n
         help
-            While the gadget is unpaired and already online, it also shows a
-            QR code for the Muse app (on a colour screen; the link goes to the
-            serial console and the light breathes cyan otherwise) and polls
-            Muse for its device tokens, which the app seals to a key only the
-            gadget holds. Pairing stays open for 10 minutes after boot or a
-            button press. Bluetooth setup stays on and works as before;
-            whichever finishes first wins. The protocol is in
-            docs/code-pairing.md.
+            Pair an already-online gadget through a QR code and outbound
+            HTTPS. This mode keeps Bluetooth off: no advertising, companion
+            service, setup fallback or external Bluetooth helper. Network
+            access must be configured independently (cellular, Ethernet or
+            preconfigured Wi-Fi). A button press reopens the pairing window.
 
-            Code pairing needs only an IP link. It uses Wi-Fi when the gadget
-            already knows a network; another link plugs in through
-            code_pairing_net_up() and code_pairing_net_wait_up().
-
-            Experimental: Muse turns code pairing on and off on its side, and
-            the gadget falls back to Bluetooth setup whenever it is off.
+            Experimental: requires Muse app and backend support for
+            docs/code-pairing.md. When unavailable the gadget stays unpaired;
+            retry QR pairing later. The network hooks are code_pairing_net_up()
+            and code_pairing_net_wait_up(); the portable core also accepts
+            platform HTTP, storage, display, clock and crypto implementations.
 
     config GADGET_CODE_PAIRING_QR
         bool "Show a QR code on boards with a screen"
@@ -119,8 +115,8 @@ menu "ESP32 Device SDK"
         help
             Leave empty to use the gadget's usual API root. Set it to test
             against a local server that implements docs/code-pairing.md.
-            When the payload names no API root, the gadget keeps using this
-            one after pairing.
+            This is trusted local configuration. Drops cannot override it;
+            the gadget keeps using this root after pairing.
 
     config HOMEHUB_TOKEN_REFRESH_INTERVAL_DAYS
         int "Proactive device token refresh interval (days, 0 = disabled)"
@@ -187,7 +183,7 @@ menu "ESP32 Device SDK"
 
     config HOMEHUB_BLE_PERSISTENT
         bool "Keep BLE running next to Wi-Fi and the Noise session"
-        depends on BT_NIMBLE_ENABLED && !MUSE_ENABLED
+        depends on BT_NIMBLE_ENABLED && !MUSE_ENABLED && !GADGET_CODE_PAIRING
         default n
         help
             By default the NimBLE stack is shut down and its memory released

@@ -891,6 +891,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
 }
 
 static void start_advertising(void) {
+    if (!s_device_name) return;
     if (s_shutting_down) return;
     // The companion service keeps the device visible after setup.
     if (!s_companion_advertising) {
@@ -981,6 +982,10 @@ static void host_task(void *arg) {
 }
 
 void ble_server_start(const char *device_name, const ble_callbacks_t *cb) {
+#if CONFIG_GADGET_CODE_PAIRING
+    // QR-only firmware never enables Bluetooth, including companion/bench paths.
+    return;
+#endif
     if (s_started) return;
     if (cb) {
         s_cb = *cb;

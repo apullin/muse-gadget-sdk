@@ -218,6 +218,9 @@ class CodePairingHarnessTest(unittest.TestCase):
     def test_verify(self) -> None:
         self._run("verify")
 
+    def test_security(self) -> None:
+        self._run("security")
+
     def test_claim_code(self) -> None:
         self._run("claim_code")
 
@@ -318,6 +321,20 @@ class CodePairingSourceContractTest(unittest.TestCase):
         start = app.index("static bool complete_setup_and_stop_ble(")
         body = app[start:app.index("\n}\n", start)]
         self.assertIn("code_pairing_esp_stop()", body)
+
+    def test_code_pairing_blocks_bluetooth_start_and_preserves_network_setup(self) -> None:
+        for name, signature in (("app.c", "static void start_ble_setup_server_if_needed(void)"),
+                                ("ble_server.c", "void ble_server_start(")):
+            source = (MAIN / name).read_text()
+            body = source[source.index(signature):]
+            self.assertRegex(body, r"(?s)^[^{]+\{\s*#if CONFIG_GADGET_CODE_PAIRING\n"
+                                   r"[^#]*?return;\s*#endif")
+        kconfig = (MAIN / "Kconfig.projbuild").read_text()
+        persistent = kconfig[kconfig.index("config HOMEHUB_BLE_PERSISTENT\n"):]
+        self.assertIn("!GADGET_CODE_PAIRING", persistent.split("default", 1)[0])
+        app = (MAIN / "app.c").read_text()
+        self.assertIn("#elif CONFIG_GADGET_CODE_PAIRING\n#define WIFI_WITHOUT_PAIRING 1", app)
+        self.assertIn("#if !CONFIG_GADGET_CODE_PAIRING\n        } else if (setup_complete", app)
 
     def test_factory_reset_deletes_the_keys(self) -> None:
         store = (MAIN / "config_store.c").read_text()

@@ -54,7 +54,7 @@ without Bluetooth, with a code (`musegadget pair --code`, experimental).
   Bullseye (Python 3.9, cryptography 3.3.2) and later, and Ubuntu 22.04 and
   later.
 - [uv](https://docs.astral.sh/uv/) for tests and builds.
-- For a real device: BlueZ, and `python3-dbus` and `python3-gi` from apt.
+- For Bluetooth setup only (not `pair --code`): BlueZ, and `python3-dbus` and `python3-gi` from apt.
   These have no Linux wheels, so the venv must use the system interpreter
   with `--system-site-packages`. Don't point it at a uv-managed Python.
 
@@ -121,7 +121,7 @@ sudo musegadget info                 # identity and pairing state
 
 State lives in `/var/lib/musegadget` (mode 0700): `identity.json` survives
 unpairing, `pairing.json` holds the device tokens, and `code_pairing.json`
-holds the code pairing key and code secret until the device pairs. The local socket is
+holds the pairing key until the device pairs. Code secrets are memory-only. The local socket is
 `/run/musegadget/musegadget.sock`, owned by root and the run-as account's group.
 
 A healthy start logs `commands run as <user>`, `Noise session established`,
@@ -165,13 +165,13 @@ seals the device tokens to that key (HPKE, `hpke.py`) and drops them on the
 server under the node id, key fingerprint and code; the device polls
 `/device_drop/poll` with its last six codes, opens the drop, and pairs. The
 server only ever holds ciphertext. Muse turns code pairing on and off; when it
-is off the command says to use Bluetooth setup. Linux gets online with the OS's
-own networking, so there is no access point here.
+is off the command stays unpaired and asks the user to retry `pair --code`.
+Linux gets online with the OS's own networking, so there is no access point here.
 
-- The X25519 key and the 32-byte code secret are in `code_pairing.json`,
-  created when the device is unpaired and has none, kept across restarts (so
-  the QR code keeps the same key), and deleted once it pairs or by
-  `musegadget unpair`. The one-time code is HOTP-SHA256 over `floor(t / 10)`.
+- The X25519 key is in `code_pairing.json` and survives restarts until paired
+  or reset. Every pairing window creates a fresh RAM-only code secret; old
+  photographed codes cannot return when the clock resets. Codes use
+  HOTP-SHA256 over `floor(t / 10)`.
 - Pairing stays open for 10 minutes (`--timeout`).
 - Anyone who saw the QR code can drop something. A drop that doesn't open, isn't
   `provision_v2`, or whose tokens Muse rejects is ignored, its code is no longer
@@ -182,6 +182,10 @@ own networking, so there is no access point here.
   checks the tokens with `fetch_vms`, saves `pairing.json` as Bluetooth setup
   does, acknowledges the drop, deletes the key and code secret, and prints
   `Paired to <username>`.
+- Binding and verification must both succeed before credentials are saved.
+  Transient errors keep the latest tokens pending in RAM until the window
+  expires. Drop-provided API/gateway overrides are ignored; redirects are
+  refused. Only locally configured endpoints are trusted.
 - It prints `key fingerprint: <hex>` once and `pair url: <link>` each time the
   link changes, on lines of their own, for scripts.
 - Never log the key, the code secret, one-time codes, a drop or tokens.

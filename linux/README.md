@@ -83,9 +83,11 @@ It shows a QR code that changes every 10 seconds. Scan it with the Muse app and
 approve the device. The app encrypts the device's tokens to a key that never
 leaves the machine, so Muse's servers only pass them along. Scan only a code
 shown by a machine in front of you: a photo of it stops working within a
-minute. Pairing stays open for 10 minutes. Muse turns code pairing on and off;
-when it's off, the command tells you to use Bluetooth setup instead. The
-machine uses its own network connection, so there is no Wi-Fi step.
+minute; restarting creates fresh codes too. Pairing stays open for 10 minutes.
+This route never starts Bluetooth. If unavailable, retry `musegadget pair --code`
+later. The machine uses its own network connection, so there is no Wi-Fi step
+and no BlueZ dependency for this command. Production use requires matching app
+and backend support; see [the integration contract](../docs/code-pairing.md).
 
 Every setup creates a fresh encrypted session, and pairing only opens when you
 run the installer or `musegadget pair` on the machine itself. Because these are

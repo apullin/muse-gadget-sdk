@@ -109,7 +109,7 @@ def cmd_pair_code(args: argparse.Namespace) -> int:
     again = "Run `musegadget pair --code` to try again."
     print({
         Outcome.UNAVAILABLE: "Code pairing isn't available right now. "
-                             "Pair over Bluetooth instead: `musegadget pair`.",
+                             "Retry later with `musegadget pair --code`. Bluetooth stays off.",
         Outcome.INVALID_SDK_TOKEN: f"Can't pair: {result.detail}.",
         Outcome.SDK_TOKEN_LIMIT: f"Can't pair: {result.detail}.",
         Outcome.ALREADY_PAIRED: "Already paired. Run `musegadget unpair` first, or pass --force.",

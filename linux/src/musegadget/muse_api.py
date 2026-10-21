@@ -32,6 +32,16 @@ FETCH_PATH = "/fetch_vms"
 REFRESH_PATH = "/device_token/refresh"
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Never forward a device bearer or SDK token to a redirect target.
+        return None
+
+
+def urlopen(req, timeout=15):
+    return urllib.request.build_opener(_NoRedirect()).open(req, timeout=timeout)
+
+
 def api_root(api_url_v2: str = "") -> str:
     """The URL that API paths are appended to: ``api_url_v2``, or the Muse API.
 
@@ -70,7 +80,7 @@ def fetch_vms_with_status(
     req.add_header("X-API-Version", "1.0.0")
     req.add_header("User-Agent", user_agent())
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urlopen(req, timeout=15) as resp:
             status = resp.getcode()
             data = json.loads(resp.read())
     except urllib.error.HTTPError as exc:
@@ -124,7 +134,7 @@ def _post_refresh(
     req.add_header("Authorization", auth_header)
     req.add_header("Content-Type", "application/json")
     req.add_header("User-Agent", user_agent())
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    with urlopen(req, timeout=15) as resp:
         data = json.loads(resp.read())
     if isinstance(data, dict) and isinstance(data.get("payload"), dict):
         data = data["payload"]

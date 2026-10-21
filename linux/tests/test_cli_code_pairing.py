@@ -109,7 +109,7 @@ def test_a_link_too_long_for_a_qr_code_still_prints_the_link(code_pairing, capsy
 
 
 @pytest.mark.parametrize("outcome, detail, message", [
-    (cp.Outcome.UNAVAILABLE, None, "Pair over Bluetooth instead: `musegadget pair`."),
+    (cp.Outcome.UNAVAILABLE, None, "Retry later with `musegadget pair --code`. Bluetooth stays off."),
     (cp.Outcome.INVALID_SDK_TOKEN, "the SDK token is not valid", "Can't pair: the SDK token is not valid."),
     (cp.Outcome.SDK_TOKEN_LIMIT, "this SDK token already pairs as many gadgets as it can",
      "Can't pair: this SDK token already pairs as many gadgets as it can."),

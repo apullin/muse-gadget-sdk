@@ -15,7 +15,7 @@
  */
 
 // The ESP-IDF platform for code pairing (code_pairing.h): HTTPS with the
-// certificate bundle, an X25519 key and a one-time-code secret in NVS, HPKE
+// certificate bundle, an X25519 key in NVS and a fresh code secret in RAM, HPKE
 // primitives from PSA Crypto, and the status LED or screen.
 
 #include "code_pairing_esp.h"
@@ -56,10 +56,10 @@
 
 static const char *TAG = "link.code_pair";
 
-// NVS keys. A setup reset deletes the key pair and the code secret
-// (config_clear_setup()); pairing deletes all three.
+// NVS keys: the recipient key and optional claim sticker. The legacy code
+// secret is erased on migration; new window secrets live only in RAM.
 #define KEY_NVS "cp_key"      // X25519 private key, base64url
-#define SECRET_NVS "cp_otp"   // one-time-code secret, base64url
+#define SECRET_NVS "cp_otp"   // legacy code secret, erased on migration
 #define CLAIM_NVS "cp_claim"  // a claim sticker's code, written at flash time
 #define MAX_RESPONSE_BYTES 4096
 #define HTTP_TIMEOUT_MS 15000
@@ -235,18 +235,18 @@ static bool x25519_public(const uint8_t sk[32], uint8_t pk[32]) {
     return st == PSA_SUCCESS && len == 32;
 }
 
-// The key pair and code secret: from NVS, or made from the hardware random
-// source and saved first.
-static bool p_load_keys(void *ctx, uint8_t pubkey[32], uint8_t code_secret[32]) {
+// The persistent key pair. The core creates a fresh RAM-only code secret
+// for each pairing window; remove legacy persisted code secrets.
+static bool p_load_keys(void *ctx, uint8_t pubkey[32]) {
     (void)ctx;
     uint8_t sk[32];
-    bool ok = load_b64_32(KEY_NVS, sk) && load_b64_32(SECRET_NVS, code_secret);
+    config_erase_key(SECRET_NVS);
+    bool ok = load_b64_32(KEY_NVS, sk);
     if (!ok) {
         esp_fill_random(sk, sizeof(sk));
-        esp_fill_random(code_secret, 32);
         // A key that isn't kept would change after a restart, and a payload
         // sealed to it could never be opened.
-        ok = save_b64_32(KEY_NVS, sk) && save_b64_32(SECRET_NVS, code_secret);
+        ok = save_b64_32(KEY_NVS, sk);
         if (ok) {
             ESP_LOGI(TAG, "made a new pairing key");
         } else {
@@ -257,7 +257,6 @@ static bool p_load_keys(void *ctx, uint8_t pubkey[32], uint8_t code_secret[32]) 
     }
     ok = ok && x25519_public(sk, pubkey);
     mbedtls_platform_zeroize(sk, sizeof(sk));
-    if (!ok) mbedtls_platform_zeroize(code_secret, 32);
     return ok;
 }
 
@@ -526,8 +525,7 @@ static void p_show_status(void *ctx, code_pairing_state_t state) {
             }
             return;
         case CODE_PAIRING_EXPIRED:
-            ESP_LOGI(TAG, "Pairing closed. Press the button to show the code again, "
-                          "or pair over Bluetooth.");
+            ESP_LOGI(TAG, "Pairing closed. Press the button to show a fresh code.");
             break;
         case CODE_PAIRING_IDLE:
         case CODE_PAIRING_UNAVAILABLE:
@@ -535,8 +533,12 @@ static void p_show_status(void *ctx, code_pairing_state_t state) {
             break;
     }
     clear_code();
-    // Back to the Bluetooth setup light while unpaired.
-    if (!config_setup_complete()) led_status_set_state(LED_STATE_BLE_ADVERTISING);
+    // QR-only mode stays unpaired; it never starts Bluetooth as recovery.
+    if (!config_setup_complete()) {
+        led_status_set_state(LED_STATE_UNPAIRED);
+        led_status_set_title(state == CODE_PAIRING_UNAVAILABLE
+                             ? "Pairing unavailable; retry later" : "Press to pair again");
+    }
 }
 
 static void p_log(void *ctx, code_pairing_log_level_t level, const char *msg) {

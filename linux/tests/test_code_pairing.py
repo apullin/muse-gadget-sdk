@@ -29,6 +29,7 @@ SDK_TOKEN = "mgst_" + "A" * 43
 API = "https://api.example.test"
 NODE = "homelink-abcdef"
 T0 = 1_000_000.0     # counter 100000, at a counter boundary
+SECRET = bytes(range(32))
 C0 = 100_000
 
 
@@ -137,6 +138,7 @@ def run(script, clock=None, verify=None, refresh=None, api_root=API, **kwargs):
     if script.clock is None:
         script.clock = clock
     codes, statuses = [], []
+    kwargs.setdefault("random_bytes", lambda n: SECRET[:n])
     result = cp.CodePairing(
         api_root=api_root, transport=script, clock=clock, sleep=clock.sleep,
         verify=verify or Verify(), refresh=refresh or Refresh(), on_code=codes.append,
@@ -188,9 +190,10 @@ def test_keys_are_private_kept_and_replaced_when_unreadable(state):
     first = keys(state)
     path = state / cp.STATE_FILE
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    assert len(first.code_secret) == 32 and first.claim_code is None
+    assert first.claim_code is None
+    assert "code_secret" not in json.loads(path.read_text())
     again = keys(state)
-    assert again.public_key == first.public_key and again.code_secret == first.code_secret
+    assert again.public_key == first.public_key
     path.write_text('{"private_key": "short", "code_secret": "x"}')
     assert keys(state).public_key != first.public_key
     cp.delete_keys(state)
@@ -217,7 +220,7 @@ def test_pairs_binds_the_sdk_token_checks_saves_acks_and_forgets_the_keys(state)
 
     assert result == cp.Result(cp.Outcome.PAIRED, None, "Sam")
     assert script.paths() == [cp.POLL_PATH] * 3 + [cp.ACK_PATH]
-    expected = [cp.one_time_code(k.code_secret, n) for n in range(C0, C0 - 6, -1)]
+    expected = [cp.one_time_code(SECRET, n) for n in range(C0, C0 - 6, -1)]
     first = script.polls()[0]
     assert first == {"node_id": NODE, "key_fingerprint": k.fingerprint,
                      "recent_otps": expected, "sdk_token": SDK_TOKEN}
@@ -239,7 +242,7 @@ def test_pairs_binds_the_sdk_token_checks_saves_acks_and_forgets_the_keys(state)
     }
     # Filed under the newest code of the third poll (counter C0 + 1), acknowledged with it.
     assert script.calls[-1][1] == {"node_id": NODE, "key_fingerprint": k.fingerprint,
-                                   "otp": cp.one_time_code(k.code_secret, C0 + 1),
+                                   "otp": cp.one_time_code(SECRET, C0 + 1),
                                    "ack_nonce": "ACK-NONCE"}
     assert not (state / cp.STATE_FILE).exists()
 
@@ -269,10 +272,10 @@ def test_the_ack_answer_does_not_matter(state, ack_answer):
 @pytest.mark.parametrize("api_root, payload_v2, saved_v2", [
     (muse_api.API_BASE, None, ""),
     (API, None, API),
-    (API, "https://v2.example.test/", "https://v2.example.test"),
+    (API, "https://v2.example.test/", API),
     (API, "http://plain.example.test", API),
 ])
-def test_api_url_v2_comes_from_the_payload_or_the_api_root_used(state, api_root, payload_v2, saved_v2):
+def test_payload_cannot_override_the_trusted_api_root(state, api_root, payload_v2, saved_v2):
     verify, refresh = Verify(), Refresh()
     script = Script(drop(state, provision(api_url_v2=payload_v2)), OK)
     assert run(script, verify=verify, refresh=refresh, api_root=api_root)[0].outcome is cp.Outcome.PAIRED
@@ -282,9 +285,9 @@ def test_api_url_v2_comes_from_the_payload_or_the_api_root_used(state, api_root,
     assert json.loads((state / config.PAIRING_FILE).read_text())["api_url_v2"] == saved_v2
 
 
-def test_noise_host_is_kept_only_when_it_is_a_host_name(state):
+def test_payload_cannot_override_the_noise_gateway(state):
     run(Script(drop(state, provision(noise_host="noise.example.test")), OK))
-    assert json.loads((state / config.PAIRING_FILE).read_text())["noise_host"] == "noise.example.test"
+    assert json.loads((state / config.PAIRING_FILE).read_text())["noise_host"] == ""
     run(Script(drop(state, provision(noise_host="https://evil/path")), OK), force=True)
     assert json.loads((state / config.PAIRING_FILE).read_text())["noise_host"] == ""
 
@@ -313,7 +316,7 @@ def test_a_clock_that_starts_at_zero_presents_only_codes_that_exist(state):
 def test_a_drop_that_does_not_open_or_validate_is_ignored(state, bad):
     other = hpke.public_key_bytes(X25519PrivateKey.generate())
     k = keys(state)
-    old = cp.one_time_code(k.code_secret, C0 - 1)
+    old = cp.one_time_code(SECRET, C0 - 1)
     answer = {
         "wrong_aad": drop(state, otp=old, aad=b"homelink-000000"),
         "wrong_info": drop(state, otp=old, info=b"muse-mailbox-v1"),
@@ -386,24 +389,50 @@ def test_an_sdk_token_refusal_on_the_binding_refresh_stays_unpaired(state, kind,
     assert (state / cp.STATE_FILE).exists()  # still unpaired: the keys stay
 
 
-def test_an_unreachable_binding_refresh_keeps_the_original_tokens(state):
+@pytest.mark.parametrize("failure", [(None, None, None), (None, 503, None), (None, 400, None)])
+def test_binding_must_succeed_before_verification_or_storage(state, failure):
     verify = Verify()
-    assert run(Script(drop(state), OK), refresh=Refresh((None, None, None)),
-               verify=verify)[0].outcome is cp.Outcome.PAIRED
-    assert verify.calls[0][0] == "AT-SECRET"
-    assert json.loads((state / config.PAIRING_FILE).read_text())["refresh_token"] == "RT-SECRET"
+    script = Script(drop(state))
+    result = run(script, refresh=Refresh(failure), verify=verify, timeout_s=20)[0]
+    assert result.outcome is cp.Outcome.TIMED_OUT
+    assert verify.calls == []
+    assert len(script.polls()) == 1
+    assert not (state / config.PAIRING_FILE).exists()
+    assert (state / cp.STATE_FILE).exists()
+    assert cp.ACK_PATH not in script.paths()
 
 
-def test_the_token_check_is_retried_and_an_unreachable_one_still_pairs(state):
-    clock = Clock()
+def test_verification_retries_keep_rotated_tokens_without_rebinding(state):
+    refresh = Refresh()
     verify = Verify(([], None), ([], 502), ([{"vm_url": "wss://vm", "vm_auth_token": "v"}], 200))
-    assert run(Script(drop(state), OK), clock=clock, verify=verify)[0] == cp.Result(
-        cp.Outcome.PAIRED, None, "Sam")
-    assert len(verify.calls) == 3 and clock.sleeps[-2:] == [2, 4]
+    script = Script(drop(state), OK)
+    result = run(script, verify=verify, refresh=refresh)[0]
+    assert result == cp.Result(cp.Outcome.PAIRED, None, "Sam")
+    assert len(refresh.calls) == 1 and len(script.polls()) == 1
+    assert verify.calls == [("AT-2", API)] * 3
+    assert json.loads((state / config.PAIRING_FILE).read_text())["refresh_token"] == "RT-2"
 
-    result = run(Script(drop(state), OK), verify=Verify(([], None)), force=True)[0]
-    assert result.outcome is cp.Outcome.PAIRED and "couldn't reach Muse" in result.detail
-    assert (state / config.PAIRING_FILE).exists()
+
+@pytest.mark.parametrize("answer", [([], None), ([], 502), ([], 200)])
+def test_unverified_tokens_never_replace_pairing_or_erase_keys(state, answer):
+    old = {"access_token": "kept"}
+    (state / config.PAIRING_FILE).write_text(json.dumps(old))
+    script = Script(drop(state))
+    result = run(script, verify=Verify(answer), force=True, timeout_s=20)[0]
+    assert result.outcome is cp.Outcome.TIMED_OUT
+    assert json.loads((state / config.PAIRING_FILE).read_text()) == old
+    assert (state / cp.STATE_FILE).exists()
+    assert cp.ACK_PATH not in script.paths()
+
+
+def test_successful_but_late_verification_does_not_commit(state):
+    clock = Clock()
+    def verify(*args):
+        clock.t += 30
+        return Verify()(*args)
+    result = run(Script(drop(state)), verify=verify, clock=clock, timeout_s=20)[0]
+    assert result.outcome is cp.Outcome.TIMED_OUT
+    assert not (state / config.PAIRING_FILE).exists()
 
 
 # --- Poll answers ----------------------------------------------------------
@@ -442,7 +471,7 @@ def test_transport_errors_and_5xx_back_off_never_faster_than_the_interval(state)
     assert statuses.count((cp.Status.WAITING, None)) == 2  # shown again once Muse answers
 
 
-def test_unavailable_falls_back_to_bluetooth(state):
+def test_unavailable_stays_on_the_code_pairing_route(state):
     script = Script(PENDING, problem("devicePairUnavailable", status=403))
     assert run(script)[0].outcome is cp.Outcome.UNAVAILABLE
     assert (state / cp.STATE_FILE).exists()
@@ -481,20 +510,18 @@ def test_the_qr_code_is_redrawn_on_time_even_when_polls_are_slow(state):
     assert [t - T0 for _, _, t in script.calls] == [3, 33]
 
 
-def test_a_restart_shows_the_same_key_and_keeps_presenting_its_codes(state):
-    clock = Clock()
+def test_restart_with_reset_clock_keeps_key_but_never_reuses_codes(state):
     first = Script(PENDING, KeyboardInterrupt())
-    result, codes, _ = run(first, clock=clock)
+    result, shown, _ = run(first, clock=Clock(0))
     assert result.outcome is cp.Outcome.INTERRUPTED
-    k = keys(state)
-    assert cp.parse_pair_link(codes[0].pair_url)["k"] == cp.b64url(k.public_key)
-
-    clock.t += 30
-    again = Script(drop(state, otp=first.polls()[0]["recent_otps"][0]), OK)
-    result, codes, _ = run(again, clock=clock)
+    old_code = cp.parse_pair_link(shown[0].pair_url)["o"]
+    again = Script(drop(state, otp=old_code), drop(state), OK)
+    result, codes, _ = run(again, clock=Clock(0), random_bytes=lambda n: b"Z" * n)
     assert result.outcome is cp.Outcome.PAIRED
-    assert codes[0].fingerprint == k.fingerprint
-    assert first.polls()[0]["recent_otps"][0] in again.polls()[0]["recent_otps"]
+    assert codes[0].fingerprint == shown[0].fingerprint
+    assert old_code not in again.polls()[0]["recent_otps"]
+    assert codes[0].pair_url != shown[0].pair_url
+    assert len(again.polls()) == 2  # a server replay of an unrequested code is ignored
 
 
 def test_a_paired_device_is_left_alone_unless_forced(state):
@@ -519,12 +546,31 @@ def test_no_secret_reaches_the_log(state, caplog):
     caplog.set_level(logging.DEBUG)
     k = keys(state)
     script = Script(cp.TransportError("down"), (503, {}, {}), problem("slow_down", interval=6),
-                    drop(state, otp=cp.one_time_code(k.code_secret, C0 - 1), raw=b"junk"),
+                    drop(state, otp=cp.one_time_code(SECRET, C0 - 1), raw=b"junk"),
                     PENDING, drop(state), OK)
     assert run(script, refresh=Refresh())[0].outcome is cp.Outcome.PAIRED
     secrets = ["AT-SECRET", "RT-SECRET", "AT-2", "RT-2", "ACK-NONCE", SDK_TOKEN, SDK_TOKEN[5:],
-               cp.b64url(k.code_secret), cp.b64url(hpke.private_key_bytes(k.private_key))]
+               cp.b64url(SECRET), cp.b64url(hpke.private_key_bytes(k.private_key))]
     secrets += [code for body in script.polls() for code in body["recent_otps"]]
     assert caplog.text
     for secret in secrets:
         assert secret not in caplog.text
+
+
+def test_migration_removes_old_code_secret_but_keeps_key_and_claim(state):
+    k = cp.load_or_create_keys(state, claim_code="C1A1M0DE")
+    data = json.loads((state / cp.STATE_FILE).read_text())
+    data["code_secret"] = cp.b64url(SECRET)
+    (state / cp.STATE_FILE).write_text(json.dumps(data))
+    migrated = cp.load_or_create_keys(state)
+    assert migrated.public_key == k.public_key and migrated.claim_code == k.claim_code
+    assert "code_secret" not in json.loads((state / cp.STATE_FILE).read_text())
+
+
+def test_randomness_failure_stays_unpaired_without_requests(state):
+    def fail(n):
+        raise OSError("unavailable")
+    script = Script()
+    assert run(script, random_bytes=fail)[0].outcome is cp.Outcome.FAILED
+    assert not script.calls
+    assert not (state / config.PAIRING_FILE).exists()

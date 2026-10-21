@@ -32,7 +32,7 @@ def sent(monkeypatch):
         bodies.append((req.get_header("Authorization"), json.loads(req.data)))
         return io.BytesIO(json.dumps(TOKENS).encode())
 
-    monkeypatch.setattr(muse_api.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(muse_api, "urlopen", urlopen)
     return bodies
 
 
@@ -58,7 +58,7 @@ def test_a_rejected_refresh_reports_401(monkeypatch):
     def urlopen(req, timeout):
         raise muse_api.urllib.error.HTTPError(req.full_url, 401, "", {}, io.BytesIO(b""))
 
-    monkeypatch.setattr(muse_api.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(muse_api, "urlopen", urlopen)
     assert muse_api.refresh_device_token("r", "homelink-abcdef") == (None, 401)
 
 
@@ -67,7 +67,41 @@ def test_a_refused_refresh_reports_the_problem_type(monkeypatch):
         body = io.BytesIO(json.dumps({"type": "sdkTokenRevoked", "title": "x"}).encode())
         raise muse_api.urllib.error.HTTPError(req.full_url, 403, "", {}, body)
 
-    monkeypatch.setattr(muse_api.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(muse_api, "urlopen", urlopen)
     assert muse_api.refresh_device_token_detailed("r", "homelink-abcdef", sdk_token="mgst_t") == (
         None, 403, "sdkTokenRevoked")
     assert muse_api.refresh_device_token("r", "homelink-abcdef") == (None, 403)
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_api_credentials_never_follow_redirects(status):
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from musegadget import code_pairing
+
+    seen = []
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.path)
+            self.send_response(status)
+            self.send_header("Location", "/credential-collector")
+            self.end_headers()
+        do_POST = do_GET
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        root = "http://127.0.0.1:%d" % server.server_port
+        assert muse_api.fetch_vms_with_status("dummy-access", root) == ([], status)
+        assert muse_api.refresh_device_token("dummy-refresh", "node", root,
+                                             "dummy-sdk")[1] == status
+        assert code_pairing.urllib_transport(root + code_pairing.POLL_PATH,
+                                            {"sdk_token": "dummy-sdk"})[0] == status
+        assert seen == [muse_api.FETCH_PATH, muse_api.REFRESH_PATH, code_pairing.POLL_PATH]
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()

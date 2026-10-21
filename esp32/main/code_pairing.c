@@ -365,8 +365,6 @@ static uint32_t next_wake(code_pairing_t *cp, uint64_t now) {
 static void forget_drop(code_pairing_t *cp) {
     free_secret(&cp->access_token);
     free_secret(&cp->refresh_token);
-    wipe(cp->api_url_v2, sizeof(cp->api_url_v2));
-    wipe(cp->noise_host, sizeof(cp->noise_host));
     wipe(cp->username, sizeof(cp->username));
     wipe(cp->ack_nonce, sizeof(cp->ack_nonce));
     wipe(cp->drop_otp, sizeof(cp->drop_otp));
@@ -447,6 +445,20 @@ static void skip_otp(code_pairing_t *cp, const char *otp) {
     cp->skip_next = (cp->skip_next + 1) % CODE_PAIRING_SKIP_OTPS;
 }
 
+static bool requested_otp(code_pairing_t *cp, const char *otp, uint64_t at) {
+    if (!otp || skipped(cp, otp)) return false;
+    if (cp->cfg.claim_code && strcmp(otp, cp->cfg.claim_code) == 0) return true;
+    uint64_t c = counter_at(cp, at);
+    for (int i = 0; i < recent_codes(cp) && (uint64_t)i <= c; i++) {
+        char expected[CODE_PAIRING_OTP_LEN + 1];
+        code_pairing_otp(cp->secret, c - (uint64_t)i, expected);
+        bool matches = strcmp(otp, expected) == 0;
+        wipe(expected, sizeof(expected));
+        if (matches) return true;
+    }
+    return false;
+}
+
 static char *poll_body(code_pairing_t *cp, uint64_t now) {
     cJSON *root = cJSON_CreateObject();
     if (!root) return NULL;
@@ -523,17 +535,12 @@ static bool take_drop(code_pairing_t *cp, const char *plaintext, const char *otp
         json_free(msg);
         return false;
     }
-    const char *api = json_str(msg, "api_url_v2");
-    const char *noise = json_str(msg, "noise_host");
     const char *username = json_str(msg, "username");
     const char *nonce = json_str(msg, "ack_nonce");
     forget_drop(cp);
     cp->access_token = dup_str(access);
     cp->refresh_token = dup_str(refresh);
-    copy_str(cp->api_url_v2, sizeof(cp->api_url_v2),
-             api && printable_ascii(api, sizeof(cp->api_url_v2) - 1) ? api : "");
-    copy_str(cp->noise_host, sizeof(cp->noise_host),
-             noise && printable_ascii(noise, sizeof(cp->noise_host) - 1) ? noise : "");
+    // A drop does not authenticate its sender. Never accept endpoint overrides.
     copy_str(cp->username, sizeof(cp->username),
              username && strlen(username) < sizeof(cp->username) ? username : "");
     copy_str(cp->ack_nonce, sizeof(cp->ack_nonce),
@@ -575,6 +582,7 @@ static uint32_t step_poll(code_pairing_t *cp) {
     cp->net_logged = false;
 
     answer_t a;
+    uint64_t requested_at = now;
     post(cp, POLL_PATH, poll_body(cp, now), &a);
     now = now_ms(cp);
     uint32_t interval_ms = cp->interval_s * 1000u;
@@ -588,7 +596,7 @@ static uint32_t step_poll(code_pairing_t *cp) {
     } else if (a.status == 200) {
         cp->backoff_s = 0;
         const char *otp = a.json ? json_str(a.json, "otp") : NULL;
-        char *plaintext = a.json
+        char *plaintext = a.json && requested_otp(cp, otp, requested_at)
             ? open_sealed(cp, cJSON_GetObjectItemCaseSensitive(a.json, "sealed")) : NULL;
         bool taken = plaintext && take_drop(cp, plaintext, otp);
         if (plaintext) {
@@ -599,10 +607,11 @@ static uint32_t step_poll(code_pairing_t *cp) {
             answer_free(&a);
             cp_log(cp, CODE_PAIRING_LOG_INFO, "a payload opened; checking its tokens with Muse");
             cp->phase = bind_wanted(cp) ? PHASE_BIND : PHASE_VERIFY;
+            cp->next_poll_ms = 0;
             return 0;
         }
-        // Anyone who saw the QR code can drop something; only the Muse
-        // app's payload opens and carries tokens.
+        // Anyone who saw the QR code can seal a payload. Token verification
+        // at our configured API root is mandatory.
         skip_otp(cp, otp);
         cp_log(cp, CODE_PAIRING_LOG_WARN, "ignored a drop that isn't for this gadget");
     } else if (strcmp(a.type, "authorization_pending") == 0
@@ -627,7 +636,7 @@ static uint32_t step_poll(code_pairing_t *cp) {
         answer_free(&a);
         return fail(cp, CODE_PAIRING_ERROR, "invalidRequest");
     } else if (strcmp(a.type, "devicePairUnavailable") == 0) {
-        cp_log(cp, CODE_PAIRING_LOG_INFO, "code pairing is off; use Bluetooth setup");
+        cp_log(cp, CODE_PAIRING_LOG_INFO, "code pairing is off; retry code pairing later");
         answer_free(&a);
         return fail(cp, CODE_PAIRING_UNAVAILABLE, "devicePairUnavailable");
     } else if (a.status == 429 || strcmp(a.type, "rateLimited") == 0) {
@@ -665,12 +674,26 @@ static uint32_t reject_drop(code_pairing_t *cp) {
     return back_to_polling(cp);
 }
 
+// Keep the current (possibly rotated) tokens in RAM while retrying. Fetching
+// the original drop again could reuse a refresh token already consumed by Muse.
+static uint32_t retry_verification(code_pairing_t *cp) {
+    uint64_t now = now_ms(cp);
+    if (now >= cp->window_end_ms) return fail(cp, CODE_PAIRING_EXPIRED, NULL);
+    uint32_t delay = max_u32(cp->interval_s * 1000u,
+                            jitter(cp, next_backoff_s(cp) * 1000u));
+    cp->next_poll_ms = now + delay;
+    return next_wake(cp, now);
+}
+
 static uint32_t step_bind(code_pairing_t *cp) {
     char *new_access = NULL, *new_refresh = NULL;
     code_pairing_result_t r = cp->p->bind_tokens(cp->p->ctx, cp->access_token,
                                                  cp->refresh_token, &new_access, &new_refresh);
-    if (r == CODE_PAIRING_RESULT_OK && new_access && *new_access && new_refresh
-        && *new_refresh) {
+    if (r == CODE_PAIRING_RESULT_OK && (!new_access || !*new_access
+                                       || !new_refresh || !*new_refresh)) {
+        r = CODE_PAIRING_RESULT_RETRY;
+    }
+    if (r == CODE_PAIRING_RESULT_OK) {
         // Use the pair the refresh returned from now on.
         free_secret(&cp->access_token);
         free_secret(&cp->refresh_token);
@@ -690,32 +713,32 @@ static uint32_t step_bind(code_pairing_t *cp) {
             return reject_drop(cp);
         case CODE_PAIRING_RESULT_RETRY:
             cp_log(cp, CODE_PAIRING_LOG_WARN,
-                   "couldn't record the SDK token yet; keeping the payload's tokens");
-            break;
+                   "couldn't bind the SDK token; keeping pairing pending");
+            return retry_verification(cp);
         case CODE_PAIRING_RESULT_OK:
             break;
     }
     cp->phase = PHASE_VERIFY;
+    cp->next_poll_ms = 0;
+    cp->backoff_s = 0;
     return 0;
 }
 
 static uint32_t step_verify(code_pairing_t *cp) {
-    code_pairing_result_t r = cp->p->verify_tokens
-        ? cp->p->verify_tokens(cp->p->ctx, cp->access_token) : CODE_PAIRING_RESULT_OK;
+    code_pairing_result_t r = cp->p->verify_tokens(cp->p->ctx, cp->access_token);
     if (r == CODE_PAIRING_RESULT_REJECTED || r == CODE_PAIRING_RESULT_SDK_REFUSED) {
         return reject_drop(cp);
     }
     if (r == CODE_PAIRING_RESULT_RETRY) {
-        // No verdict: nothing is saved. The drop stays on the server for two
-        // minutes, so the next poll brings it back for another try.
         cp_log(cp, CODE_PAIRING_LOG_WARN, "couldn't check the drop's tokens; trying again");
-        return back_to_polling(cp);
+        return retry_verification(cp);
     }
-    const char *api = cp->api_url_v2[0] ? cp->api_url_v2 : cp->cfg.base_url;
+    if (now_ms(cp) >= cp->window_end_ms) return fail(cp, CODE_PAIRING_EXPIRED, NULL);
+    const char *api = cp->cfg.base_url;
     if (!cp->p->save_tokens
         || !cp->p->save_tokens(cp->p->ctx, cp->access_token, cp->refresh_token,
                                cp->cfg.node_id, api,
-                               cp->noise_host[0] ? cp->noise_host : NULL,
+                               NULL,
                                cp->username[0] ? cp->username : NULL)) {
         cp_log(cp, CODE_PAIRING_LOG_ERROR, "the tokens couldn't be saved");
         return fail(cp, CODE_PAIRING_ERROR, "storage");
@@ -763,9 +786,21 @@ void code_pairing_init(code_pairing_t *cp, const code_pairing_platform_t *platfo
 void code_pairing_start(code_pairing_t *cp) {
     if (cp->phase != PHASE_NONE) return;
     cp->problem[0] = '\0';
-    if (!cp->p->load_keys || !cp->p->load_keys(cp->p->ctx, cp->pubkey, cp->secret)) {
+    if (!cp->p->load_keys || !cp->p->load_keys(cp->p->ctx, cp->pubkey)) {
         cp_log(cp, CODE_PAIRING_LOG_ERROR, "device key unavailable");
         fail(cp, CODE_PAIRING_ERROR, "deviceKey");
+        return;
+    }
+    // Uptime may reset on boot. A fresh secret makes every window disjoint,
+    // even with the same key pair, device id and counter.
+    if (!cp->p->random_bytes
+        || !cp->p->random_bytes(cp->p->ctx, cp->secret, sizeof(cp->secret))) {
+        fail(cp, CODE_PAIRING_ERROR, "randomSource");
+        return;
+    }
+    if (!cp->p->verify_tokens || (cp->cfg.sdk_token && cp->cfg.sdk_token[0]
+                                  && !cp->p->bind_tokens)) {
+        fail(cp, CODE_PAIRING_ERROR, "tokenVerifier");
         return;
     }
     code_pairing_fingerprint(cp->pubkey, cp->fingerprint);
@@ -790,6 +825,22 @@ void code_pairing_stop(code_pairing_t *cp) {
 
 uint32_t code_pairing_step(code_pairing_t *cp, code_pairing_state_t *state) {
     uint32_t delay = CODE_PAIRING_NO_STEP;
+    if (cp->phase == PHASE_BIND || cp->phase == PHASE_VERIFY) {
+        uint64_t now = now_ms(cp);
+        if (now >= cp->window_end_ms) {
+            delay = fail(cp, CODE_PAIRING_EXPIRED, NULL);
+            goto done;
+        }
+        refresh_code(cp, now);
+        if (now < cp->next_poll_ms) {
+            delay = next_wake(cp, now);
+            goto done;
+        }
+        if (cp->p->net_up && !cp->p->net_up(cp->p->ctx)) {
+            delay = retry_verification(cp);
+            goto done;
+        }
+    }
     switch (cp->phase) {
         case PHASE_POLL:   delay = step_poll(cp); break;
         case PHASE_ACK:    delay = step_ack(cp); break;
@@ -797,6 +848,7 @@ uint32_t code_pairing_step(code_pairing_t *cp, code_pairing_state_t *state) {
         case PHASE_VERIFY: delay = step_verify(cp); break;
         default: break;
     }
+done:
     if (state) *state = cp->state;
     return delay;
 }

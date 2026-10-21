@@ -84,6 +84,8 @@
 #include "muse_input.h"
 // Muse joins Wi-Fi from its own settings, before or without pairing.
 #define WIFI_WITHOUT_PAIRING 1
+#elif CONFIG_GADGET_CODE_PAIRING
+#define WIFI_WITHOUT_PAIRING 1
 #else
 #define WIFI_WITHOUT_PAIRING 0
 #endif
@@ -691,7 +693,7 @@ static bool complete_setup_and_stop_ble(const char *reason, uint32_t session_gen
     advance_confirm_generation_locked();
     setup_window_lock_give();
 #if CONFIG_GADGET_CODE_PAIRING
-    code_pairing_esp_stop();  // whichever setup finishes first wins
+    code_pairing_esp_stop();  // close any remaining pairing window
 #endif  // CONFIG_GADGET_CODE_PAIRING
     if (!s_ble_started) return true;
     ESP_LOGI(TAG, "setup complete via %s; stopping BLE", reason);
@@ -2123,6 +2125,10 @@ static void on_client_disconnected(void) {
 }
 
 static void start_ble_setup_server_if_needed(void) {
+#if CONFIG_GADGET_CODE_PAIRING
+    // This route never initializes the Bluetooth controller or host.
+    return;
+#endif
     if (s_ble_started) return;
 
     ble_callbacks_t cb = {
@@ -2199,12 +2205,14 @@ static void open_setup_window(const char *reason) {
         return;
     }
 
+#if CONFIG_GADGET_CODE_PAIRING
+    ESP_LOGI(TAG, "%s: QR pairing; waiting for an IP link", reason);
+    ui_set_ble("off");
+    code_pairing_esp_restart();
+    return;
+#endif
     start_ble_setup_server_if_needed();
     enter_advertising_state(reason);
-#if CONFIG_GADGET_CODE_PAIRING
-    // A press after the pairing window closed shows the code again.
-    code_pairing_esp_restart();
-#endif  // CONFIG_GADGET_CODE_PAIRING
 }
 
 static void on_button_short_press(void) {
@@ -2421,6 +2429,10 @@ bool app_hatch_vm_credentials(const char *want_vm, char *vm_id, size_t id_cap,
 
 #if CONFIG_MUSE_ENABLED
 void app_ble_companion_set(bool advertise) {
+#if CONFIG_GADGET_CODE_PAIRING
+    ui_set_ble("off");
+    return;
+#endif
     if (advertise) start_ble_setup_server_if_needed();
     ble_server_set_companion_advertising(advertise);
     if (config_setup_complete()) ui_set_ble(advertise ? "companion" : "off");
@@ -2756,6 +2768,7 @@ void app_run(void) {
             if (!config_clear_setup()) {
                 ESP_LOGE(TAG, "partial setup deletion could not be verified");
             }
+#if !CONFIG_GADGET_CODE_PAIRING
         } else if (setup_complete && !have_wifi && WIFI_WITHOUT_PAIRING) {
             // Muse can forget the network after pairing. With no Wi-Fi and
             // pairing refused once setup is done, the device would be stuck,
@@ -2765,6 +2778,7 @@ void app_run(void) {
                 ESP_LOGE(TAG, "setup deletion could not be verified");
             }
             setup_complete = false;
+#endif
         }
     }
 
@@ -2832,7 +2846,11 @@ void app_run(void) {
         // Unpaired devices advertise automatically — no button press is needed
         // to become discoverable. Pairing enforces the configured confirmation policy.
         open_setup_window("boot: unpaired");
+#if CONFIG_GADGET_CODE_PAIRING
+        ESP_LOGI(TAG, "QR pairing enabled; Bluetooth stays off");
+#else
         ESP_LOGI(TAG, "BLE advertising; press the button to confirm pairing");
+#endif
         vTaskDelay(pdMS_TO_TICKS(500));
         if (!schedule_scan_refresh(false, NULL)) {
             ESP_LOGW(TAG, "background boot scan unavailable");
@@ -2848,7 +2866,7 @@ void app_run(void) {
         ble_coex_set_active(true);
         ui_set_ble("companion");
 #endif
-#if CONFIG_MUSE_ENABLED && CONFIG_SPIRAM
+#if CONFIG_MUSE_ENABLED && CONFIG_SPIRAM && !CONFIG_GADGET_CODE_PAIRING
         // Muse may turn on its BLE companion later. The controller needs a
         // 30 KB internal block that TLS and the VM session leave fragmented,
         // so bring the stack up now; it stays silent until advertising is on.
@@ -2939,7 +2957,11 @@ void app_run(void) {
             led_status_set_state(LED_STATE_ERROR);
         }
     } else {
+#if CONFIG_GADGET_CODE_PAIRING
+        ESP_LOGI(TAG, "QR pairing needs an IP link; configure networking first");
+#else
         ESP_LOGI(TAG, "no wifi creds, waiting for BLE provision");
+#endif
     }
 
 #if CONFIG_MUSE_ENABLED
@@ -2960,7 +2982,7 @@ void app_run(void) {
 #endif
 
 #if CONFIG_GADGET_CODE_PAIRING
-        // Unpaired and online: offer code pairing beside Bluetooth setup.
+        // Unpaired and online: start the QR-only pairing window.
         if (!config_setup_complete() && code_pairing_net_up()) {
             code_pairing_esp_start_if_idle();
         }

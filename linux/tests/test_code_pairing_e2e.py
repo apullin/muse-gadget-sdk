@@ -167,6 +167,7 @@ def test_a_restart_before_pairing_keeps_the_same_key(fake, state):
     cli = Cli(fake, state)
     url = cli.pair_url()
     assert cp.parse_pair_link(url)["k"] == first["k"]
+    assert cp.parse_pair_link(url)["o"] != first["o"]
     fake.approve(url)
     status, _, err = cli.finish()
     assert status == 0, err
@@ -201,11 +202,11 @@ def test_without_an_sdk_token_nothing_is_bound(fake, state):
     assert all("sdk_token" not in r["body"] for r in fake.requests() if r["path"] == "/device_drop/poll")
 
 
-def test_unavailable_falls_back_to_bluetooth(fake, state):
+def test_unavailable_stays_on_the_code_pairing_route(fake, state):
     fake.configure(unavailable=True)
     status, out, err = Cli(fake, state).finish()
     assert status == 1
-    assert "Pair over Bluetooth instead: `musegadget pair`." in err
+    assert "Retry later with `musegadget pair --code`. Bluetooth stays off." in err
     assert not (state / config.PAIRING_FILE).exists()
 
 
@@ -255,7 +256,7 @@ def _run(fake, state, monkeypatch, clock, timeout_s=60, **kwargs):
     monkeypatch.setenv(config.SDK_TOKEN_ENV, SDK_TOKEN)
     fake.configure(enforce_interval=False)  # the fake clock polls fast in real time
     return cp.CodePairing(api_root=fake.base_url, clock=clock, sleep=clock.sleep,
-                          timeout_s=timeout_s, **kwargs).run()
+                          timeout_s=timeout_s, random_bytes=lambda n: bytes(range(n)), **kwargs).run()
 
 
 @pytest.mark.parametrize("age, outcome", [(5, cp.Outcome.PAIRED), (7, cp.Outcome.TIMED_OUT)])
@@ -263,7 +264,7 @@ def test_a_qr_code_older_than_a_minute_is_never_picked_up(fake, state, monkeypat
     keys = cp.load_or_create_keys(state)
     clock = Clock()
     c = cp.counter(clock.t)
-    approved = fake.approve(cp.pair_link(NODE, keys.public_key, cp.one_time_code(keys.code_secret, c - age)))
+    approved = fake.approve(cp.pair_link(NODE, keys.public_key, cp.one_time_code(bytes(range(32)), c - age)))
     result = _run(fake, state, monkeypatch, clock)
     assert result.outcome is outcome
     drops = fake.drops()["drops"]
@@ -276,7 +277,7 @@ def test_a_qr_code_older_than_a_minute_is_never_picked_up(fake, state, monkeypat
 def test_a_drop_for_another_key_or_code_gets_nothing(fake, state, monkeypatch, wrong):
     keys = cp.load_or_create_keys(state)
     clock = Clock()
-    code = cp.one_time_code(keys.code_secret, cp.counter(clock.t))
+    code = cp.one_time_code(bytes(range(32)), cp.counter(clock.t))
     if wrong == "fingerprint":
         other = hpke.public_key_bytes(X25519PrivateKey.generate())
         fake.approve(cp.pair_link(NODE, other, code))
@@ -294,13 +295,13 @@ def test_junk_drops_are_ignored_and_the_real_one_picked_up(fake, state, monkeypa
     base = {"node_id": NODE, "key_fingerprint": keys.fingerprint}
     # Junk that doesn't open, then a payload that opens but carries tokens Muse never minted:
     # anyone who saw the QR code can make both.
-    fake.deliver(**base, otp=cp.one_time_code(keys.code_secret, c - 1),
+    fake.deliver(**base, otp=cp.one_time_code(bytes(range(32)), c - 1),
                  sealed={"v": 1, "enc": cp.b64url(os.urandom(32)), "ct": cp.b64url(os.urandom(48))})
     forged = cp.seal_json(keys.public_key, cp.PAYLOAD_INFO, NODE.encode(), {
         "action": "provision_v2", "access_token": "forged", "refresh_token": "forged",
         "token_type": "device", "username": "Mallory"})
-    fake.deliver(**base, otp=cp.one_time_code(keys.code_secret, c - 2), sealed=forged)
-    fake.approve(cp.pair_link(NODE, keys.public_key, cp.one_time_code(keys.code_secret, c)))
+    fake.deliver(**base, otp=cp.one_time_code(bytes(range(32)), c - 2), sealed=forged)
+    fake.approve(cp.pair_link(NODE, keys.public_key, cp.one_time_code(bytes(range(32)), c)))
 
     statuses = []
     result = _run(fake, state, monkeypatch, clock,
@@ -324,7 +325,7 @@ def test_a_claim_code_pairs_from_the_sticker(fake, state, monkeypatch):
 def test_a_lost_poll_answer_is_handed_out_again(fake, state, monkeypatch):
     keys = cp.load_or_create_keys(state)
     clock = Clock()
-    fake.approve(cp.pair_link(NODE, keys.public_key, cp.one_time_code(keys.code_secret, cp.counter(clock.t))))
+    fake.approve(cp.pair_link(NODE, keys.public_key, cp.one_time_code(bytes(range(32)), cp.counter(clock.t))))
     dropped = []
 
     def lossy(url, body):

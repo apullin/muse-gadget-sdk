@@ -16,8 +16,16 @@ limitations under the License.
 
 # Code pairing: pair a gadget without Bluetooth
 
-**Status: experimental.** Muse turns code pairing on and off on its side. A gadget
-must fall back to Bluetooth setup whenever code pairing is unavailable.
+**Status: experimental integration contract.** This repository implements the
+Linux and portable C clients and a local test service. Production availability
+requires matching Muse app and backend support; the test service is not evidence
+that a production endpoint or app flow is enabled.
+
+**This route uses no Bluetooth.** The gadget gets online independently, for
+example over cellular, and all device traffic is outbound HTTPS. No Bluetooth
+radio, helper, advertising or fallback is required. If the service is unavailable,
+stay unpaired and let the person retry QR pairing later. The phone needs its own
+internet connection; it need not share a network with the gadget.
 
 Bluetooth setup needs the phone next to the gadget: the Muse app opens an
 encrypted Bluetooth session and pushes the gadget its device tokens. Code pairing
@@ -80,17 +88,21 @@ connects to its Muse the same way.
 
 ## What the gadget keeps
 
-When the gadget is unpaired and doesn't have them yet, it generates, from a
-cryptographically secure random source:
+An unpaired gadget generates an **X25519 key pair** from a cryptographically
+secure random source if it has none. `device_pubkey` is base64url of its 32-byte
+public key. Its **fingerprint** is the first 8 bytes of SHA-256 over those bytes,
+as 16 lowercase hex characters, e.g. `300c9c9603b92a4b`.
 
-- an **X25519 key pair**. `device_pubkey` is base64url of the 32-byte public key.
-  Its **fingerprint** is the first 8 bytes of SHA-256 over those 32 bytes, as
-  16 lowercase hex characters, e.g. `300c9c9603b92a4b`.
-- a 32-byte **code secret** for the one-time codes.
+It keeps the key pair across restarts, and deletes it after pairing or factory
+reset. A claim sticker, if used, is stored with this key pair.
 
-It keeps both across restarts, and deletes both once it has paired (and on a
-factory reset), so the next pairing starts with fresh ones. Neither ever leaves
-the gadget.
+**Every new pairing window**, including after a reboot, generates a fresh
+32-byte **code secret** from a cryptographically secure random source. Keep this
+secret only in RAM and discard it when the window closes. Do not reload the old
+secret or derive it from uptime. This prevents a reset clock from making an old
+photographed code valid again. C ports must provide `random_bytes`; failure to
+obtain fresh randomness must leave the device unpaired. Older persisted code
+secrets (`code_secret` / `cp_otp`) are removed on migration.
 
 ## One-time codes
 
@@ -105,8 +117,9 @@ with HMAC-SHA256 and 8 Crockford base32 characters:
 
 `c` is `floor(t / 10)`, where `t` is the gadget's own clock in seconds. Nothing
 is synchronized with the server, so any clock that advances steadily works,
-including one that restarts from zero at boot. A gadget whose screen redraws
-slowly uses a longer step (see [Gadgets with a slow screen](#gadgets-with-a-slow-screen)).
+including one that restarts from zero at boot **because each window has a fresh
+secret**. Use a monotonic clock for scheduling and the pairing deadline. A
+gadget whose screen redraws slowly uses a longer step (see [Gadgets with a slow screen](#gadgets-with-a-slow-screen)).
 
 Test vectors, for the code secret `00 01 02 … 1f` (the bytes 0 to 31):
 
@@ -173,7 +186,8 @@ While pairing, every `interval` seconds (5 to begin with):
 { "sealed": { "v": 1, "enc": "…", "ct": "…" }, "otp": "XEPZ97F6" }
 ```
 
-`otp` is the code the drop was filed under. Open `sealed` as described in
+`otp` must match one of the codes in that poll request; ignore an answer with a
+missing or unrequested code. Open `sealed` as described in
 [The sealed payload](#the-sealed-payload). If the answer is lost, polling again
 with that code still in `recent_otps` returns the same drop until it expires
 (two minutes) or the gadget acknowledges it.
@@ -185,7 +199,7 @@ Other answers, by `type`:
 | 400 | `authorization_pending` | Nothing for these codes yet (the same answer whether or not anything else is waiting). Poll again after `interval`. |
 | 400 | `slow_down` | Too fast: use the returned `interval` from now on. |
 | 400 | `invalidRequest` | A field is malformed (`detail` says which). Fix the firmware. |
-| 403 | `devicePairUnavailable` | Code pairing is off. Stop and fall back to Bluetooth setup; try code pairing again after a restart. |
+| 403 | `devicePairUnavailable` | Stop, hide the code, and remain unpaired. Retry QR pairing on an explicit button press or command. Never enable Bluetooth. |
 | 429 | `rateLimited` | Wait `Retry-After` seconds (60 if absent). |
 
 On a transport error or a `5xx`, retry with exponential backoff from 2 to 60
@@ -229,9 +243,15 @@ token-only setup:
 }
 ```
 
-There is no `ssid` or `password`: the gadget is already online. `api_url_v2`,
-`noise_host`, `username` and `ack_nonce` are optional (`ack_nonce` is 16 random
-bytes, base64url).
+There is no `ssid` or `password`: the gadget is already online. `username` and
+`ack_nonce` are optional (`ack_nonce` is 16 random bytes, base64url).
+
+`api_url_v2` and `noise_host` are legacy optional hints, ignored on this route.
+A payload cannot choose a trusted server: HPKE base mode does not authenticate
+its sender. Polling, binding, verification and saved credentials use the API
+root selected locally before pairing. The Noise gateway comes from trusted
+client configuration. Do not follow HTTP redirects with credentials. Sandbox
+endpoints must be configured on the device by its developer, never by a drop.
 
 The QR code shows the gadget's public key, so anyone who saw it can seal
 something that opens. Treat the payload as unverified until Muse accepts its
@@ -242,26 +262,67 @@ so a junk drop can't shadow the real one.
 
 ## 3. After you open it
 
-1. **Community gadgets:** refresh the device token once, with `sdk_token` in the
-   refresh request next to `device_id`. That records the SDK token against the
-   gadget, as pairing over Bluetooth does, so the token's device limit and
-   revocation apply to it; use the tokens it returns from then on.
+1. **Community gadgets:** refresh the device token with `sdk_token` and
+   `device_id` at the trusted API root. Require a successful binding response
+   with both replacement tokens before proceeding. The backend must enforce
+   device-token ownership, SDK limits and revocation; accepting and ignoring an
+   unknown `sdk_token` field is not sufficient support.
    - `sdkTokenDeviceLimitReached`, `sdkTokenInvalid` or `sdkTokenRevoked`: stay
-     unpaired, discard the tokens and tell the maker.
-   - `401` or `403`: the tokens aren't real. Ignore the drop and keep polling.
-   - Anything else (including a Muse that doesn't take `sdk_token` on refresh
-     yet, or no answer): keep the tokens from the payload and go on.
-2. Check the tokens with `fetch_vms`, as Bluetooth setup does. A `401` or `403`
-   means they aren't real: ignore the drop and keep polling.
-3. Store `access_token` and `refresh_token` exactly where Bluetooth setup stores
-   them, and keep refreshing them the same way, with `node_id` as the device id.
+     unpaired, discard the pending credentials and tell the maker.
+   - `401` or `403`: ignore the drop and omit its code from subsequent polls.
+   - No answer, malformed success, unsupported binding or another error:
+     retain the candidate in RAM and retry with bounded backoff, within the
+     pairing window. Do not mark pairing complete or bypass SDK binding.
+2. Verify the tokens with `fetch_vms` at that same trusted API root. On a
+   transient failure retain the **latest rotated tokens** in RAM and retry
+   verification, without refreshing again or retrieving the original drop.
+   On `401` or `403`, discard this candidate and resume polling for another.
+   Missing verification hooks must fail closed.
+3. Only after successful binding (when applicable) and verification, and before
+   the window expires, persist the credentials and mark pairing successful.
+   A timeout or reboot before that point leaves the gadget unpaired; a fresh
+   window requires a new scan. Never acknowledge or delete keys for an
+   unverified candidate. A previously working pairing must not be overwritten
+   by an unverified candidate.
 4. If the payload has `ack_nonce`, send `POST /device_drop/ack` with
-   `{"node_id", "key_fingerprint", "otp", "ack_nonce"}` (`otp` as the poll
-   returned it). It deletes the drop; it is optional, and its answer doesn't
-   matter.
-5. Delete the key pair and the code secret, stop polling, and show "Paired to
-   `username`" if the payload had one, so the owner sees which account the
-   gadget joined.
+   `{"node_id", "key_fingerprint", "otp", "ack_nonce"}`. This optional,
+   best-effort request deletes the drop after credentials are safely stored.
+5. Delete the key pair and the window secret, stop polling, and show the account
+   name when available. A payload's `username` is only a display hint, not
+   cryptographic proof of ownership.
+
+## Muse app and backend integration
+
+These pieces must be implemented or confirmed in the internal app/backend;
+the SDK and `/_fake/*` test routes do not supply them:
+
+- Handle the pairing URL in the app, validate its fields, display the target
+  device/account and require explicit approval. Supporting the system camera
+  also requires a working app/universal-link or authenticated web handoff.
+- Authenticate the approving account; authorize minting tokens for the exact
+  `node_id`; seal the token-only payload to the scanned key; deliver it through
+  an authenticated app API. Define that production API separately from
+  `/_fake/approve`, `/_fake/mint` and `/_fake/deliver`.
+- Bind SDK attribution to the device with enforced limits/revocation. Validate
+  device identity and account binding server-side; knowing a QR code alone is
+  not manufacturer attestation or proof of physical proximity.
+- Implement poll/ack, a two-minute ciphertext TTL, one pending drop per
+  `(node_id, key_fingerprint, otp)` and `409 dropAlreadyDelivered` on duplicate
+  delivery. Authenticate deletion with the encrypted acknowledgement nonce
+  (for example by storing its hash). Rate-limit delivery as well as polling;
+  prevent overwrites, account-claim races and cross-device credential reuse.
+- Make refresh retries safe if a response is lost after rotating a token,
+  using bounded reuse tolerance or an idempotent binding operation. The client
+  cannot recover a replacement token it never received.
+- Keep QR secrets, credentials and sealed payloads out of analytics and logs.
+  Define unpairing, revocation and recovery without Bluetooth. Exercise the
+  complete path on cellular with dropped responses, slow TLS and device resets.
+
+For a constrained MCU, the C core's platform interface supplies HTTP, clock,
+CSPRNG, X25519/AES-GCM, key/token storage and display. It has no ESP-IDF or BLE
+dependency. The ESP32 adapter is an example; an STM32/BG96 adapter can reuse an
+existing cellular TLS stack. Prefer connection reuse for polls, with timeouts
+appropriate to that link; polling cadence starts after the prior request ends.
 
 ## Gadgets with a slow screen
 
@@ -310,7 +371,7 @@ contract.
   approve only a gadget in front of them, and the gadget shows "Paired to
   `username`" afterwards; tell your users the same: scan only a code shown by a
   gadget you own, in front of you, and pair again if the name is wrong.
-- Keep the private key, the code secret and any claim code in storage that
-  isn't readable over the network, the serial console or a debug interface in
+- Keep the private key, the in-memory code secret and any claim code
+  unreadable over the network, the serial console or a debug interface in
   production builds.
 - Never put the SDK token in a QR code, a sticker or a log.
