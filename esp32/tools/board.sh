@@ -30,6 +30,8 @@
 #              Seeed reTerminal E1001 (ESP32-S3) with a 7.5 inch e-paper
 #   reterminal-e1002
 #              Seeed reTerminal E1002 (ESP32-S3) with a 7.3 inch colour e-paper
+#   m5paper-color
+#              M5Stack M5Paper Color (ESP32-S3) with a 4 inch colour e-paper
 #   reterminal-sticky
 #              Seeed reTerminal Sticky (ESP32-S3) with a 3.97 inch e-paper
 #   reterminal-sticky-link
@@ -78,6 +80,12 @@ case "$BOARD" in
     TARGET=esp32s3
     DEFAULTS="$DEFAULTS;devices/sdkconfig.$BOARD"
     PORTS="/dev/cu.usbserial-* /dev/cu.wchusbserial* /dev/ttyUSB*"
+    ;;
+  m5paper-color)
+    TARGET=esp32s3
+    DEFAULTS="$DEFAULTS;devices/sdkconfig.$BOARD"
+    # Native USB only (USB-Serial-JTAG).
+    PORTS="/dev/cu.usbmodem* /dev/ttyACM*"
     ;;
   reterminal-sticky)
     TARGET=esp32s3

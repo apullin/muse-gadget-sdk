@@ -127,6 +127,9 @@ jobs:
           - board: reterminal-e1002
             target: esp32s3
             overlays: ";devices/sdkconfig.reterminal-e1002"
+          - board: m5paper-color
+            target: esp32s3
+            overlays: ";devices/sdkconfig.m5paper-color"
           - board: reterminal-sticky
             target: esp32s3
             overlays: ";devices/sdkconfig.muse;devices/sdkconfig.reterminal-sticky"

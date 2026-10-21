@@ -51,5 +51,9 @@
   {
     "board": "reterminal-e1002",
     "name": "Seeed Studio reTerminal E1002 (7.3\" colour e-paper)"
+  },
+  {
+    "board": "m5paper-color",
+    "name": "M5Stack M5Paper Color (4\" colour e-paper)"
   }
 ]

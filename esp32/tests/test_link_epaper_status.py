@@ -427,7 +427,7 @@ int main(void) {
             self.assertIn(f"{name} #{int(r):02x}{int(g):02x}{int(b):02x}", text)
         self.assertIn("led_status_display_bits", driver)
         self.assertIn("return s_panel->update_gray4 ? 2 : s_panel->bits_per_pixel;", driver)
-        for panel, bits in (("epd_spectra6.c", 4), ("epd_uc8179.c", 1),
+        for panel, bits in (("epd_spectra6.c", 4), ("epd_ed2208.c", 4), ("epd_uc8179.c", 1),
                             ("epd_ssd1681.c", 1), ("epd_ssd1677.c", 1)):
             self.assertRegex((ROOT / "main" / panel).read_text(),
                              rf"\.bits_per_pixel\s*=\s*{bits},", panel)
@@ -439,6 +439,8 @@ int main(void) {
                                 r'list\(APPEND GADGET_SRCS "epaper_status.c" "epd_uc8179.c"\)\s*'
                                 r'elseif\(CONFIG_HOMEHUB_LED_BACKEND_RETERMINAL_SPECTRA6\)\s*'
                                 r'list\(APPEND GADGET_SRCS "epaper_status.c" "epd_spectra6.c"\)\s*'
+                                r'elseif\(CONFIG_HOMEHUB_LED_BACKEND_M5PAPER_COLOR_ED2208\)\s*'
+                                r'list\(APPEND GADGET_SRCS "epaper_status.c" "epd_ed2208.c"\)\s*'
                                 r'elseif\(CONFIG_HOMEHUB_LED_BACKEND_STICKY_SSD1677\)\s*'
                                 r'list\(APPEND GADGET_SRCS "epaper_status.c" "epd_ssd1677.c"\)\s*'
                                 r'elseif\(CONFIG_HOMEHUB_LED_BACKEND_WAVESHARE_SSD1681\)\s*'
